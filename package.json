@@ -1,0 +1,25 @@
+{
+  "name": "blyxt",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply blyxt --local",
+    "db:migrate:remote": "wrangler d1 migrations apply blyxt --remote",
+    "discover": "bun --env-file=.dev.vars scripts/discover.ts",
+    "set-webhook": "bun --env-file=.dev.vars scripts/set-webhook.ts",
+    "typecheck": "tsc",
+    "test": "bun test"
+  },
+  "trustedDependencies": ["esbuild", "workerd"],
+  "dependencies": {
+    "marked": "^18.0.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "@types/bun": "latest",
+    "typescript": "^5",
+    "wrangler": "^4.146.0"
+  }
+}

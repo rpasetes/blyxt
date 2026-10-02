@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "blyxt",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-28",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "blyxt",
+      // filled in by `wrangler d1 create blyxt` once there is a Cloudflare account
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // public identity of the blyg; rslantonie.com/blyg/* is rewritten to this Worker by Vercel
+    "ORIGIN": "https://rslantonie.com/blyg/",
+    "SITE_TITLE": "russell's blyg",
+    "AUTHOR_NAME": "russell",
+    "AUTHOR_URL": "https://rslantonie.com/",
+    // from `bun run discover`; 0 means unset
+    "TELEGRAM_CHAT_ID": "0",
+    "PUB_TOPIC_ID": "0",
+    "OWNER_USER_ID": "0"
+  }
+  // secrets (wrangler secret put / .dev.vars): TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
+}
