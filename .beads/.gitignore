@@ -1,0 +1,5 @@
+*.db
+*.db-*
+daemon.*
+bd.sock
+beads.left.*
