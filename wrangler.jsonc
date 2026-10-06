@@ -19,9 +19,9 @@
     "AUTHOR_NAME": "russell",
     "AUTHOR_URL": "https://rslantonie.com/",
     // from `bun run discover`; 0 means unset
-    "TELEGRAM_CHAT_ID": "0",
-    "PUB_TOPIC_ID": "0",
-    "OWNER_USER_ID": "0"
+    "TELEGRAM_CHAT_ID": "-1003932920900",
+    "PUB_TOPIC_ID": "2",
+    "OWNER_USER_ID": "2046988413"
   }
   // secrets (wrangler secret put / .dev.vars): TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
 }
