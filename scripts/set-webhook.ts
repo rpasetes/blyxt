@@ -11,6 +11,8 @@ const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
     url: new URL("/telegram/webhook", base).href,
     secret_token: secret,
     allowed_updates: ["message", "edited_message"],
+    // messages sent while no webhook was set would otherwise publish on arrival
+    drop_pending_updates: true,
   }),
 });
 console.log(await res.json());
