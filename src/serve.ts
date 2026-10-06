@@ -23,7 +23,7 @@ async function respond(req: Request, body: string, type: keyof typeof TYPES) {
 }
 
 const json = (req: Request, data: unknown) => respond(req, JSON.stringify(data, null, 2) + "\n", "json");
-const notFound = () => new Response("not found\n", { status: 404, headers: { "access-control-allow-origin": "*" } });
+const notFound = (path = "") => new Response(`not found: /${path}\n`, { status: 404, headers: { "access-control-allow-origin": "*" } });
 
 export async function serveBlyg(req: Request, db: D1Database, site: Site, path: string) {
   if (path === "" || path === "index.html") return respond(req, indexPage(site, await listItems(db)), "html");
@@ -54,5 +54,5 @@ export async function serveBlyg(req: Request, db: D1Database, site: Site, path: 
     return respond(req, itemPage(site, item), "html");
   }
 
-  return notFound();
+  return notFound(path);
 }
