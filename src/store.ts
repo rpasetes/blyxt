@@ -55,3 +55,25 @@ export async function publishNew(db: D1Database, kind: Kind, md: string, source:
   ]);
   return item;
 }
+
+// next version of an existing item; returns null when the text didn't change
+export async function publishEdit(db: D1Database, id: string, md: string) {
+  const item = await getItem(db, id);
+  if (!item || item.kind === "withdrawn" || item.content_md === md) return null;
+  const at = now();
+  const next: Item = {
+    ...item,
+    updated: at,
+    version: item.version + 1,
+    content_md: md,
+    content_html: render(md),
+    content_hash: await contentHash(md),
+  };
+  await db.batch([
+    db.prepare("UPDATE items SET updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ? WHERE id = ? AND version = ?")
+      .bind(next.updated, next.version, next.content_md, next.content_html, next.content_hash, id, item.version),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)")
+      .bind(id, next.version, next.kind, at, next.content_md, next.content_html, next.content_hash),
+  ]);
+  return next;
+}

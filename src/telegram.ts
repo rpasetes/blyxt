@@ -1,7 +1,7 @@
 // Write side: Telegram webhook → blyg publishes.
 // Bot API: https://core.telegram.org/bots/api
 import { pagePath, type Site } from "./blyg";
-import { itemForMessage, publishNew } from "./store";
+import { itemForMessage, publishEdit, publishNew } from "./store";
 
 export type TgMessage = {
   message_id: number;
@@ -44,6 +44,7 @@ const inPub = (cfg: Config, m: TgMessage) =>
   m.chat.id === cfg.chatId && m.message_thread_id === cfg.pubTopicId && m.from?.id === cfg.ownerId;
 
 export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site, cfg: Config) {
+  if (update.edited_message) return handleEdit(update.edited_message, db, site, cfg);
   const m = update.message;
   if (!m?.text || !inPub(cfg, m) || m.text.startsWith("/")) return null;
 
@@ -52,4 +53,16 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
 
   const item = await publishNew(db, "fragment", m.text.trim(), { chatId: m.chat.id, messageId: m.message_id });
   return () => reply(cfg, m, `published v1 → ${site.origin}${pagePath(item)}`);
+}
+
+// editing a published message publishes its next version
+async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
+  if (!m.text || !inPub(cfg, m)) return null;
+  const link = await itemForMessage(db, m.chat.id, m.message_id);
+  if (!link) return null;
+
+  // unchanged text (including Telegram retries) is not a new version
+  const item = await publishEdit(db, link.item_id, m.text.trim());
+  if (!item) return null;
+  return () => reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
 }
