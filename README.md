@@ -28,7 +28,7 @@ bun test && bun run typecheck
 
 1. Bot: create with @BotFather, turn privacy mode off (`/setprivacy` → Disable), add it to the group as an admin.
 2. Ids: with no webhook set, post in each topic and run `bun run discover`; put the chat, Pub topic and your user id in `wrangler.jsonc`.
-3. Cloudflare: `bunx wrangler login`, `bunx wrangler d1 create blyxt` (copy `database_id` into `wrangler.jsonc`), `bun run db:migrate:remote`, `bunx wrangler secret put TELEGRAM_BOT_TOKEN`, `bunx wrangler secret put TELEGRAM_WEBHOOK_SECRET`, `bun run deploy`.
+3. Cloudflare: `bunx wrangler login` (or put `CLOUDFLARE_API_TOKEN=...` in `.cloudflare.env` and `set -a; . ./.cloudflare.env`), `bunx wrangler d1 create blyxt` (copy `database_id` into `wrangler.jsonc`), `bun run db:migrate:remote`, `bunx wrangler secret put TELEGRAM_BOT_TOKEN`, `bunx wrangler secret put TELEGRAM_WEBHOOK_SECRET`, `bun run deploy`.
 4. Webhook: `bun run set-webhook https://blyxt.<account>.workers.dev`.
 5. motherbase `vercel.json`: rewrite `/blyg/:path*` → `https://blyxt.<account>.workers.dev/:path*`.
 

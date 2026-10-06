@@ -2,13 +2,13 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "blyxt",
   "main": "src/index.ts",
+  "account_id": "90f565eb037373e6cd4d90f335439160",
   "compatibility_date": "2026-09-28",
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "blyxt",
-      // filled in by `wrangler d1 create blyxt` once there is a Cloudflare account
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "4d3b84b7-2b42-48b7-b475-ac9b97b9091b",
       "migrations_dir": "migrations"
     }
   ],
