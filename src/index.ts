@@ -1,5 +1,6 @@
 import type { Site } from "./blyg";
 import { serveBlyg } from "./serve";
+import { pollDue } from "./subscribe";
 import { handleUpdate, type TgUpdate } from "./telegram";
 
 export type Env = {
@@ -10,6 +11,7 @@ export type Env = {
   AUTHOR_URL: string;
   TELEGRAM_CHAT_ID: string;
   PUB_TOPIC_ID: string;
+  SUB_TOPIC_ID: string;
   OWNER_USER_ID: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
@@ -36,6 +38,7 @@ export default {
         token: env.TELEGRAM_BOT_TOKEN,
         chatId: Number(env.TELEGRAM_CHAT_ID),
         pubTopicId: Number(env.PUB_TOPIC_ID),
+        subTopicId: Number(env.SUB_TOPIC_ID),
         ownerId: Number(env.OWNER_USER_ID),
       });
       // acknowledge Telegram first; the confirmation reply goes out after
@@ -46,5 +49,10 @@ export default {
     if (req.method !== "GET" && req.method !== "HEAD") return new Response("method not allowed\n", { status: 405 });
     // Vercel rewrites rslantonie.com/blyg/:path* → this Worker's /:path*
     return serveBlyg(req, env.DB, siteOf(env), url.pathname.replace(/^\//, ""));
+  },
+
+  // cron: poll followed blygs into the Sub topic
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(pollDue(env.DB, { token: env.TELEGRAM_BOT_TOKEN, chatId: Number(env.TELEGRAM_CHAT_ID), topicId: Number(env.SUB_TOPIC_ID) }));
   },
 } satisfies ExportedHandler<Env>;
