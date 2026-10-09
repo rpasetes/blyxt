@@ -7,6 +7,7 @@ export type Env = {
   DB: D1Database;
   ORIGIN: string;
   SITE_TITLE: string;
+  SITE_SUBTITLE: string;
   AUTHOR_NAME: string;
   AUTHOR_URL: string;
   TELEGRAM_CHAT_ID: string;
@@ -22,6 +23,7 @@ const WEBHOOK_PATH = "/telegram/webhook";
 const siteOf = (env: Env): Site => ({
   origin: env.ORIGIN,
   title: env.SITE_TITLE,
+  subtitle: env.SITE_SUBTITLE,
   author: { name: env.AUTHOR_NAME, url: env.AUTHOR_URL },
 });
 

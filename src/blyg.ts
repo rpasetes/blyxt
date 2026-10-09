@@ -7,6 +7,7 @@ export type Kind = "fragment" | "thread" | "withdrawn";
 export type Site = {
   origin: string;
   title: string;
+  subtitle: string;
   author: { name: string; url: string };
 };
 
@@ -141,7 +142,7 @@ export function feed(site: Site, events: Version[], latest: Map<string, Item>, u
   <channel>
     <title>${esc(site.title)}</title>
     <link>${esc(site.origin)}</link>
-    <description>${esc(site.title)}</description>
+    <description>${esc(site.subtitle)}</description>
     <lastBuildDate>${rfc822(updated)}</lastBuildDate>
     <blyg:level>1</blyg:level>
     <blyg:manifest>${esc(site.origin)}blyg.json</blyg:manifest>
@@ -200,5 +201,5 @@ export function indexPage(site: Site, items: Item[]) {
     .filter((i) => i.kind !== "withdrawn")
     .map((i) => `<article>${i.content_html}<p class="meta"><a href="${esc(site.origin + pagePath(i))}">v${i.version} · ${i.updated}</a></p></article>`)
     .join("\n");
-  return layout(site, site.title, "", `<h1>${esc(site.title)}</h1>\n<p class="meta"><a href="feed.xml">rss</a> · <a href="blyg.json">blyg.json</a></p>\n${list}`);
+  return layout(site, site.title, `  <meta name="description" content="${esc(site.subtitle)}">`, `<h1>${esc(site.title)}</h1>\n<p><em>${esc(site.subtitle)}</em></p>\n<p class="meta"><a href="feed.xml">rss</a> · <a href="blyg.json">blyg.json</a></p>\n${list}`);
 }

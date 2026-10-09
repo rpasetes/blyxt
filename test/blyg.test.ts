@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { contentHash, excerpt, feed, ID_RE, itemDocument, newId, pagePath, render, type Item, type Site } from "../src/blyg";
 
-const site: Site = { origin: "https://example.com/blyg/", title: "t", author: { name: "a", url: "https://example.com/" } };
+const site: Site = { origin: "https://example.com/blyg/", title: "t", subtitle: "s", author: { name: "a", url: "https://example.com/" } };
 const item: Item = {
   id: "7c9wk2mhq0v3xj8tn5rzfd41bg", kind: "fragment", created: "2026-10-02T00:00:00Z", updated: "2026-10-02T00:00:00Z",
   version: 1, content_md: "hi <there>", content_html: render("hi <there>"), content_hash: "sha256:x",
