@@ -3,7 +3,7 @@ import { contentHash, directiveLines, excerpt, feed, ID_RE, itemDocument, linkId
 
 const site: Site = { origin: "https://example.com/blyg/", title: "t", subtitle: "s", author: { name: "a", url: "https://example.com/" } };
 const item: Item = {
-  id: "7c9wk2mhq0v3xj8tn5rzfd41bg", kind: "fragment", created: "2026-10-02T00:00:00Z", updated: "2026-10-02T00:00:00Z",
+  id: "7c9wk2mhq0v3xj8tn5rzfd41bg", kind: "fragment", authored_kind: "fragment", created: "2026-10-02T00:00:00Z", updated: "2026-10-02T00:00:00Z",
   version: 1, content_md: "hi <there>", content_html: render("hi <there>"), content_hash: "sha256:x",
 };
 
@@ -19,9 +19,10 @@ test("chat line breaks survive rendering", () => {
   expect(render("one\ntwo")).toContain("<br>");
 });
 
-test("page paths by kind", () => {
+test("page paths by authored kind", () => {
   expect(pagePath(item)).toBe("f/7c9wk2mhq0v3xj8tn5rzfd41bg/");
-  expect(pagePath({ ...item, kind: "thread" })).toBe("t/7c9wk2mhq0v3xj8tn5rzfd41bg/");
+  expect(pagePath({ ...item, authored_kind: "thread" })).toBe("t/7c9wk2mhq0v3xj8tn5rzfd41bg/");
+  expect(pagePath({ ...item, kind: "withdrawn" } as Item)).toBe("f/7c9wk2mhq0v3xj8tn5rzfd41bg/");
 });
 
 test("item document carries the wire fields", () => {
@@ -74,4 +75,12 @@ test("relative URLs in content_html become absolute", () => {
   expect(html).toContain('href="https://example.com/blyg/notes/x?a=1&amp;b=2"');
   expect(html).toContain('href="https://x.example/"');
   expect(html).toContain('href="mailto:a@b.c"');
+});
+
+test("a withdrawal entry is titled withdrawn with an empty description", () => {
+  const gone: Item = { ...item, kind: "withdrawn", version: 2, content_md: "", content_html: "" };
+  const xml = feed(site, [{ item_id: item.id, version: 2, kind: "withdrawn", at: item.updated, note: "oops", pinned: 0 }], new Map([[item.id, gone]]), item.updated);
+  expect(xml).toContain("<title>withdrawn</title>");
+  expect(xml).toContain("<description><![CDATA[]]></description>");
+  expect(xml).toContain("<link>https://example.com/blyg/f/7c9wk2mhq0v3xj8tn5rzfd41bg/</link>");
 });

@@ -1,9 +1,9 @@
 // Telegram webhook: Pub topic publishes, Sub topic manages subscriptions.
 // Bot API: https://core.telegram.org/bots/api
-import { pagePath, type Site } from "./blyg";
+import { ID_RE, pagePath, type Site } from "./blyg";
 import { compose } from "./compose";
 import { resolve } from "./resolve";
-import { itemForMessage, publishEdit, publishNew } from "./store";
+import { getItem, itemForMessage, publishEdit, publishNew, withdraw } from "./store";
 import { addSubscription, getSubscription, listSubscriptions, POLL_MINUTES, removeSubscription } from "./subscribe";
 
 export type TgMessage = {
@@ -12,6 +12,7 @@ export type TgMessage = {
   from?: { id: number };
   chat: { id: number };
   text?: string;
+  reply_to_message?: TgMessage;
 };
 export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage };
 
@@ -52,7 +53,8 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   if (update.edited_message) return handleEdit(update.edited_message, db, site, cfg);
   const m = update.message;
   if (m?.text && inTopic(cfg, m, cfg.subTopicId) && m.text.startsWith("/")) return () => handleSubCommand(m, db, cfg);
-  if (!m?.text || !inPub(cfg, m) || m.text.startsWith("/")) return null;
+  if (!m?.text || !inPub(cfg, m)) return null;
+  if (m.text.startsWith("/")) return handlePubCommand(m, db, site, cfg);
 
   // Telegram retries webhooks; a message publishes at most once
   if (await itemForMessage(db, m.chat.id, m.message_id)) return null;
@@ -75,8 +77,35 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   const composed = await compose(db, site.origin, md);
   if (!composed.ok) return () => reply(cfg, m, `edit not published: ${composed.error}. the post keeps its current version`);
   const item = await publishEdit(db, link.item_id, md, composed.html);
-  if (!item) return null;
+  if (!item) {
+    if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
+    return () => reply(cfg, m, "edit not published: this post is withdrawn");
+  }
   return () => reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
+}
+
+const PUB_USAGE = "reply /withdraw [note] to a published post (or /withdraw <its link> [note])";
+
+async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
+  const [command, ...args] = m.text!.trim().split(/\s+/);
+  if (command.slice(1).split("@")[0].toLowerCase() !== "withdraw") return () => reply(cfg, m, PUB_USAGE);
+
+  // a reply names the post; otherwise the first argument is its link or id. Whatever is left is the note.
+  // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
+  const replied = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
+  let id = replied ? replied.item_id : undefined;
+  if (!id) {
+    const named = args[0]?.match(/([0-9a-z]{26})\/?$/)?.[1];
+    if (named && ID_RE.test(named)) { id = named; args.shift(); }
+  }
+  if (!id) return () => reply(cfg, m, PUB_USAGE);
+  const note = args.join(" ") || null;
+
+  const item = await withdraw(db, id, note);
+  if (item) return () => reply(cfg, m, `withdrawn v${item.version} → ${site.origin}${pagePath(item)}\nits content is gone from the blyg, feed and followers' readers; the page stays as an endcap`);
+  const existing = await getItem(db, id);
+  if (!existing) return () => reply(cfg, m, `no post ${id} on this blyg`);
+  return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
 }
 
 const USAGE = "/subscribe <url> · /unsubscribe <url> · /subscriptions";

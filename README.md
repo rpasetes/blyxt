@@ -8,7 +8,7 @@ blyxt is both publisher and subscriber. It is one Cloudflare Worker that receive
 
 One Telegram supergroup with Topics:
 
-- **Pub** — send text, it becomes a public fragment. (Planned: edit → new version, pin → pin, shared link → stub.)
+- **Pub** — send text, it becomes a public fragment; edit it to publish a new version. Reply `/withdraw [note]` to a published post to withdraw it: its content is emptied everywhere and its page stays as an endcap. (Planned: pin → pin, shared link → stub.)
 - **Sub** — `/subscribe <url>` follows a blyg (a blyg URL, its site's homepage, or its feed all work), `/unsubscribe <url>`, `/subscriptions`. Followed blygs are polled every 15 minutes: new items are posted here, new versions edit the posted message, withdrawals blank it.
 - **Admin** — status, AI chat. (Planned.)
 

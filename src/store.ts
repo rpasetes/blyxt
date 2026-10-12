@@ -1,4 +1,4 @@
-import { contentHash, newId, now, type Item, type Kind, type Version } from "./blyg";
+import { contentHash, newId, now, type AuthoredKind, type Item, type Version } from "./blyg";
 
 export async function listItems(db: D1Database) {
   const { results } = await db.prepare("SELECT * FROM items ORDER BY updated DESC, id").all<Item>();
@@ -16,9 +16,11 @@ export async function changelog(db: D1Database, id: string) {
   return results;
 }
 
+// a withdrawn item contributes only its withdrawal event (§7)
 export async function recentEvents(db: D1Database, limit: number) {
   const { results } = await db
-    .prepare("SELECT item_id, version, kind, at, note, pinned FROM versions ORDER BY at DESC, version DESC LIMIT ?")
+    .prepare(`SELECT v.item_id, v.version, v.kind, v.at, v.note, v.pinned FROM versions v JOIN items i ON i.id = v.item_id
+      WHERE i.kind != 'withdrawn' OR v.version = i.version ORDER BY v.at DESC, v.version DESC LIMIT ?`)
     .bind(limit)
     .all<Version>();
   return results;
@@ -34,11 +36,12 @@ export const itemForMessage = (db: D1Database, chatId: number, messageId: number
 
 // new item at v1, linked to the Telegram message that wrote it
 // html comes from compose(), which resolves links and makes URLs absolute
-export async function publishNew(db: D1Database, kind: Kind, md: string, html: string, source: { chatId: number; messageId: number }) {
+export async function publishNew(db: D1Database, kind: AuthoredKind, md: string, html: string, source: { chatId: number; messageId: number }) {
   const at = now();
   const item: Item = {
     id: newId(),
     kind,
+    authored_kind: kind,
     created: at,
     updated: at,
     version: 1,
@@ -47,8 +50,8 @@ export async function publishNew(db: D1Database, kind: Kind, md: string, html: s
     content_hash: await contentHash(md),
   };
   await db.batch([
-    db.prepare("INSERT INTO items (id, kind, created, updated, version, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, item.kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash),
+    db.prepare("INSERT INTO items (id, kind, authored_kind, created, updated, version, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, item.kind, item.authored_kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash),
     db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)")
       .bind(item.id, 1, item.kind, at, item.content_md, item.content_html, item.content_hash),
     db.prepare("INSERT INTO tg_messages (chat_id, message_id, item_id) VALUES (?, ?, ?)")
@@ -75,6 +78,30 @@ export async function publishEdit(db: D1Database, id: string, md: string, html: 
       .bind(next.updated, next.version, next.content_md, next.content_html, next.content_hash, id, item.version),
     db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)")
       .bind(id, next.version, next.kind, at, next.content_md, next.content_html, next.content_hash),
+  ]);
+  return next;
+}
+
+// the endcap (§9): a version bump with the content emptied; the page and changelog stay
+// returns null when the item is already withdrawn
+export async function withdraw(db: D1Database, id: string, note: string | null) {
+  const item = await getItem(db, id);
+  if (!item || item.kind === "withdrawn") return null;
+  const at = now();
+  const next: Item = {
+    ...item,
+    kind: "withdrawn",
+    updated: at,
+    version: item.version + 1,
+    content_md: "",
+    content_html: "",
+    content_hash: await contentHash(""),
+  };
+  await db.batch([
+    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = '', content_html = '', content_hash = ? WHERE id = ? AND version = ?")
+      .bind(next.kind, next.updated, next.version, next.content_hash, id, item.version),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, 'withdrawn', ?, ?, '', '', ?)")
+      .bind(id, next.version, at, note, next.content_hash),
   ]);
   return next;
 }

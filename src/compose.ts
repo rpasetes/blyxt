@@ -1,5 +1,5 @@
 // Publish-time resolution of a message's markdown (§10.1–10.2): what it links, what it may not yet do.
-import { directiveLines, excerpt, linkIds, pagePath, render, type LinkTarget } from "./blyg";
+import { type AuthoredKind, directiveLines, excerpt, linkIds, pagePath, render, type LinkTarget } from "./blyg";
 import { getItem } from "./store";
 
 export type Composed = { ok: true; html: string } | { ok: false; error: string };
@@ -28,6 +28,6 @@ async function resolveLink(db: D1Database, origin: string, id: string): Promise<
     .bind(id)
     .all<{ origin: string; kind: string }>();
   if (results.length > 1) return `[[${id}]] matches posts in ${results.length} blygs you follow; the spec won't pick one`;
-  if (results.length === 1) return { url: new URL(pagePath({ id, kind: results[0].kind as "fragment" }), results[0].origin).href, label: id };
+  if (results.length === 1) return { url: new URL(pagePath({ id, authored_kind: results[0].kind as AuthoredKind }), results[0].origin).href, label: id };
   return `[[${id}]] doesn't match a post here or in a blyg you follow`;
 }

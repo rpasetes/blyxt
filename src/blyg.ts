@@ -3,6 +3,7 @@
 import { Marked } from "marked";
 
 export type Kind = "fragment" | "thread" | "withdrawn";
+export type AuthoredKind = Exclude<Kind, "withdrawn">;
 
 export type Site = {
   origin: string;
@@ -14,6 +15,7 @@ export type Site = {
 export type Item = {
   id: string;
   kind: Kind;
+  authored_kind: AuthoredKind;
   created: string;
   updated: string;
   version: number;
@@ -114,7 +116,8 @@ export function directiveLines(src: string) {
 const cdata = (s: string) => `<![CDATA[${s.replace(/]]>/g, "]]]]><![CDATA[>")}]]>`;
 const rfc822 = (iso: string) => new Date(iso).toUTCString();
 
-export const pagePath = (i: Pick<Item, "id" | "kind">) => `${i.kind === "thread" ? "t" : "f"}/${i.id}/`;
+// the page lives where the item was authored, through withdrawal and back (§5.8, §9)
+export const pagePath = (i: Pick<Item, "id" | "authored_kind">) => `${i.authored_kind === "thread" ? "t" : "f"}/${i.id}/`;
 
 export function excerpt(md: string, n = 80) {
   const s = md.replace(/!\[\[[^\]]+\]\]/g, "").replace(/^\s*>+/gm, "").replace(/[#*_`\[\]()!]/g, "").replace(/\s+/g, " ").trim();
