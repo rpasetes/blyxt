@@ -163,6 +163,24 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
   };
 }
 
+// items/{id}/v{n}.json: one pinned version, frozen (§8)
+export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash">) {
+  return {
+    blyg: "0.3",
+    id: v.item_id,
+    kind: v.kind,
+    version: v.version,
+    at: v.at,
+    note: v.note,
+    pinned: true,
+    origin: site.origin,
+    author: site.author,
+    content_md: v.content_md,
+    content_html: absolutize(v.content_html, site.origin),
+    content_hash: v.content_hash,
+  };
+}
+
 export function archiveIndex(items: Item[], updated: string) {
   return {
     updated,
@@ -234,7 +252,11 @@ ${body}
 `;
 }
 
-export function itemPage(site: Site, item: Item) {
+// the live page cites only versions promised forever: itself and its pins (§8.4)
+const pinCitations = (site: Site, item: Item, pins: number[]) =>
+  pins.length ? ` · pinned: ${pins.map((n) => `<a href="${esc(site.origin + pagePath(item))}v${n}/">v${n}</a>`).join(", ")}` : "";
+
+export function itemPage(site: Site, item: Item, pins: number[] = []) {
   const url = site.origin + pagePath(item);
   const desc = esc(excerpt(item.content_md, 200));
   const head = `  <link rel="alternate" type="application/json" href="${esc(site.origin)}items/${item.id}.json">
@@ -244,9 +266,21 @@ export function itemPage(site: Site, item: Item) {
   <meta property="og:url" content="${esc(url)}">
   <meta name="description" content="${desc}">`;
   const body = item.kind === "withdrawn"
-    ? `<p class="meta">withdrawn · v${item.version}</p>`
-    : `<article>${item.content_html}<p class="meta">${item.kind} · v${item.version} · ${item.updated}</p></article>`;
+    ? `<p class="meta">withdrawn · v${item.version}${pinCitations(site, item, pins)}</p>`
+    : `<article>${item.content_html}<p class="meta">${item.kind} · v${item.version} · ${item.updated}${pinCitations(site, item, pins)}</p></article>`;
   return layout(site, excerpt(item.content_md, 60) || site.title, head, `<p class="meta"><a href="${esc(site.origin)}">${esc(site.title)}</a></p>\n${body}`);
+}
+
+// {page}v{n}/: the human twin of a pin, visibly frozen, canonical to the live page (§8.4)
+export function pinnedPage(site: Site, item: Item, v: Version & Pick<Item, "content_md" | "content_html">) {
+  const live = site.origin + pagePath(item);
+  const head = `  <link rel="canonical" href="${esc(live)}">
+  <link rel="alternate" type="application/json" href="${esc(site.origin)}items/${item.id}/v${v.version}.json">
+  <meta name="description" content="${esc(excerpt(v.content_md, 200))}">`;
+  const body = `<p class="meta"><a href="${esc(site.origin)}">${esc(site.title)}</a></p>
+<p class="meta">frozen: v${v.version} as pinned, published ${v.at} · <a href="${esc(live)}">live version</a> · <a href="${esc(site.origin)}items/${item.id}/v${v.version}.json">json</a></p>
+<article>${absolutize(v.content_html, site.origin)}<p class="meta">${v.kind} · v${v.version}${v.note ? ` · ${esc(v.note)}` : ""}</p></article>`;
+  return layout(site, `${excerpt(v.content_md, 60) || site.title} (v${v.version})`, head, body);
 }
 
 export function indexPage(site: Site, items: Item[]) {

@@ -105,3 +105,19 @@ export async function withdraw(db: D1Database, id: string, note: string | null) 
   ]);
   return next;
 }
+
+export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string };
+
+// a pinned version's content, or null: unpinned history is never served (§8)
+export const getPinned = (db: D1Database, id: string, version: number) =>
+  db.prepare("SELECT * FROM versions WHERE item_id = ? AND version = ? AND pinned = 1").bind(id, version).first<PinnedVersion>();
+
+// pins are irrevocable and emit no feed event; updated stays the latest changelog entry's time (§5.3, §7, §8)
+export async function pin(db: D1Database, id: string, version: number) {
+  const row = await db.prepare("SELECT kind, pinned FROM versions WHERE item_id = ? AND version = ?").bind(id, version).first<{ kind: string; pinned: number }>();
+  if (!row) return "no such version" as const;
+  if (row.kind === "withdrawn") return "endcap" as const;
+  if (row.pinned) return "already" as const;
+  await db.prepare("UPDATE versions SET pinned = 1 WHERE item_id = ? AND version = ?").bind(id, version).run();
+  return "pinned" as const;
+}

@@ -3,7 +3,7 @@
 import { ID_RE, pagePath, type Site } from "./blyg";
 import { compose } from "./compose";
 import { resolve } from "./resolve";
-import { getItem, itemForMessage, publishEdit, publishNew, withdraw } from "./store";
+import { getItem, itemForMessage, pin, publishEdit, publishNew, withdraw } from "./store";
 import { addSubscription, getSubscription, listSubscriptions, POLL_MINUTES, removeSubscription } from "./subscribe";
 
 export type TgMessage = {
@@ -13,6 +13,7 @@ export type TgMessage = {
   chat: { id: number };
   text?: string;
   reply_to_message?: TgMessage;
+  pinned_message?: TgMessage;
 };
 export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage };
 
@@ -53,6 +54,7 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   if (update.edited_message) return handleEdit(update.edited_message, db, site, cfg);
   const m = update.message;
   if (m?.text && inTopic(cfg, m, cfg.subTopicId) && m.text.startsWith("/")) return () => handleSubCommand(m, db, cfg);
+  if (m?.pinned_message && inPub(cfg, m)) return handlePin(m, m.pinned_message, null, db, site, cfg);
   if (!m?.text || !inPub(cfg, m)) return null;
   if (m.text.startsWith("/")) return handlePubCommand(m, db, site, cfg);
 
@@ -84,28 +86,52 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   return () => reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
 }
 
-const PUB_USAGE = "reply /withdraw [note] to a published post (or /withdraw <its link> [note])";
+const PUB_USAGE = "reply to a published post with /withdraw [note] or /pin [vN] (or put its link first: /withdraw <link> [note])";
+
+// the post a command names: the message it replies to, else a link or id as the first argument
+// (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
+async function target(m: TgMessage, db: D1Database, args: string[]) {
+  const replied = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
+  if (replied) return replied.item_id;
+  const named = args[0]?.match(/([0-9a-z]{26})\/?$/)?.[1];
+  if (named && ID_RE.test(named)) { args.shift(); return named; }
+  return null;
+}
 
 async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
   const [command, ...args] = m.text!.trim().split(/\s+/);
-  if (command.slice(1).split("@")[0].toLowerCase() !== "withdraw") return () => reply(cfg, m, PUB_USAGE);
-
-  // a reply names the post; otherwise the first argument is its link or id. Whatever is left is the note.
-  // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
-  const replied = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
-  let id = replied ? replied.item_id : undefined;
-  if (!id) {
-    const named = args[0]?.match(/([0-9a-z]{26})\/?$/)?.[1];
-    if (named && ID_RE.test(named)) { id = named; args.shift(); }
-  }
+  const name = command.slice(1).split("@")[0].toLowerCase();
+  if (name !== "withdraw" && name !== "pin") return () => reply(cfg, m, PUB_USAGE);
+  const id = await target(m, db, args);
   if (!id) return () => reply(cfg, m, PUB_USAGE);
-  const note = args.join(" ") || null;
+  if (name === "pin") return handlePin(m, null, id, db, site, cfg, args[0]);
 
+  const note = args.join(" ") || null;
   const item = await withdraw(db, id, note);
   if (item) return () => reply(cfg, m, `withdrawn v${item.version} → ${site.origin}${pagePath(item)}\nits content is gone from the blyg, feed and followers' readers; the page stays as an endcap`);
   const existing = await getItem(db, id);
   if (!existing) return () => reply(cfg, m, `no post ${id} on this blyg`);
   return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
+}
+
+// pinning in Telegram, or /pin [vN], pins a version forever (§8); Telegram doesn't report unpins, and pins can't be undone anyway
+async function handlePin(m: TgMessage, pinned: TgMessage | null, id: string | null, db: D1Database, site: Site, cfg: Config, versionArg?: string) {
+  if (pinned) {
+    const link = await itemForMessage(db, pinned.chat.id, pinned.message_id);
+    if (!link) return null; // pinning chat that isn't a post is just Telegram
+    id = link.item_id;
+  }
+  const item = await getItem(db, id!);
+  if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
+  if (versionArg && !/^v?[1-9]\d*$/i.test(versionArg)) return () => reply(cfg, m, "usage: /pin [vN], replying to the post");
+  const version = versionArg ? Number(versionArg.replace(/^v/i, "")) : item.version;
+  const page = `${site.origin}${pagePath(item)}`;
+
+  const result = await pin(db, item.id, version);
+  if (result === "no such version") return () => reply(cfg, m, `this post has no v${version} (it's at v${item.version})`);
+  if (result === "endcap") return () => reply(cfg, m, versionArg ? `v${version} is the withdrawal; there's nothing to pin` : `this post is withdrawn; pin an earlier version with /pin vN`);
+  if (result === "already") return () => reply(cfg, m, `v${version} is already pinned → ${page}v${version}/`);
+  return () => reply(cfg, m, `pinned v${version} → ${page}v${version}/\nthis version stays readable forever, through edits and withdrawal. a pin can't be undone; unpinning in Telegram doesn't change it`);
 }
 
 const USAGE = "/subscribe <url> · /unsubscribe <url> · /subscriptions";
