@@ -1,5 +1,5 @@
 // Read side of the Sub topic: subscriptions and polling (spec §12.3, §13).
-import { ID_RE, now } from "./blyg";
+import { contentHash, ID_RE, now } from "./blyg";
 import { USER_AGENT, type Manifest } from "./resolve";
 import { toTelegramHtml } from "./tghtml";
 import { tg } from "./telegram";
@@ -28,7 +28,7 @@ type Imported = {
   replied_at?: string | null;
 };
 type IndexEntry = { id: string; kind: string; created?: string; version: number };
-type ItemDoc = { id: string; kind: string; version: number; content_html?: string; content_hash?: string; page?: string };
+type ItemDoc = { id: string; kind: string; version: number; content_md?: string; content_html?: string; content_hash?: string; page?: string };
 
 export type Bot = { token: string; chatId: number };
 // one Sub topic: a grouping of followed blygs
@@ -39,6 +39,9 @@ const KINDS = new Set(["fragment", "thread", "withdrawn"]);
 // Workers allow 50 subrequests per invocation on the free plan; leave room for Telegram calls
 const FETCH_BUDGET = 20;
 const MAX_MESSAGE = 3500;
+// already-seen items refetched per poll run, oldest check first, to catch stealth edits (§13.3)
+const SWEEP = 3;
+const RECHECK_HOURS = 6;
 // a Sub message this recent is still near the bottom of its topic, so an edit to it is seen without a reply
 const FRESH_MINUTES = 60;
 
@@ -244,12 +247,25 @@ async function applyDoc(db: D1Database, bot: Bot, s: Subscription, doc: ItemDoc,
       await discrepancy(db, bot, s, topics, seen, doc, "regression", String(highest),
         `⚠ ${s.title} served v${doc.version} of this post after showing v${highest}: its history went backwards. blyxt keeps v${highest}.`);
     }
+    // the hash is the origin's claim about its own bytes: a mismatch is a defect report, and the content is shown anyway
+    if (typeof doc.content_md === "string" && doc.content_hash && (await contentHash(doc.content_md)) !== doc.content_hash) {
+      await discrepancy(db, bot, s, topics, seen, doc, "hash", doc.content_hash,
+        `⚠ ${s.title}'s v${doc.version} of this post doesn't match its own content_hash. it's shown anyway; the blyg's software has a bug.`);
+    }
     let pending = false;
+    const stealthy: number[] = [];
     for (const topicId of [...topics]) {
       const row = seen.get(topicId)!.get(doc.id);
       if (doc.version <= (row?.version ?? 0)) {
         if ((listed ?? 0) > doc.version && doc.version === row?.version) pending = true;
-        continue;
+        if (doc.version !== row?.version || !doc.content_hash || row.content_hash === doc.content_hash) continue;
+        // same version, new content: adopt it and say so; the watermark stays (§13.3)
+        if (row.content_hash) stealthy.push(topicId);
+        else {
+          // a baseline row learns its hash quietly
+          await db.prepare("UPDATE imported SET content_hash = ? WHERE topic_id = ? AND origin = ? AND item_id = ?").bind(doc.content_hash, topicId, s.origin, doc.id).run();
+          continue;
+        }
       }
       try {
         await present(db, { ...bot, topicId }, s, doc, row);
@@ -259,6 +275,11 @@ async function applyDoc(db: D1Database, bot: Bot, s: Subscription, doc: ItemDoc,
         topics.splice(topics.indexOf(topicId), 1);
       }
     }
+    if (stealthy.length) {
+      await discrepancy(db, bot, s, stealthy, seen, doc, "stealth", doc.content_hash!,
+        `⚠ ${s.title} changed this post without a new version (still v${doc.version}). blyxt shows the new text; the change should have been v${doc.version + 1}.`);
+    }
+    await db.prepare("UPDATE imported SET checked_at = ? WHERE origin = ? AND item_id = ?").bind(now(), s.origin, doc.id).run();
     return pending ? "pending" : "done";
   } catch (e) {
     if (e instanceof Retry) return "retry";
@@ -284,6 +305,35 @@ async function discrepancy(db: D1Database, bot: Bot, s: Subscription, topics: nu
     .bind(s.origin, doc.id, kind, doc.version, detail, now()).run();
 }
 
+// the topics following a blyg, and what each has seen of it
+async function followers(db: D1Database, origin: string) {
+  const topics = (await db.prepare("SELECT topic_id FROM follows WHERE origin = ? ORDER BY created").bind(origin).all<{ topic_id: number }>()).results
+    .map((f) => f.topic_id);
+  const { results } = await db.prepare("SELECT * FROM imported WHERE origin = ?").bind(origin).all<Imported>();
+  const seen: Seen = new Map(topics.map((t) => [t, new Map<string, Imported>()]));
+  for (const r of results) seen.get(r.topic_id)?.set(r.item_id, r);
+  return { topics, seen };
+}
+
+// Version bumps show in the index; a stealth edit doesn't. Spare fetches go to refetching seen items, least recently checked first.
+async function sweep(db: D1Database, bot: Bot, budget: { left: number }) {
+  const { results } = await db.prepare(
+    `SELECT s.*, i.item_id FROM imported i JOIN subscriptions s ON s.origin = i.origin
+     WHERE i.kind != 'withdrawn' AND s.failures = 0 GROUP BY i.origin, i.item_id
+     HAVING MIN(COALESCE(i.checked_at, '')) < ? ORDER BY MIN(COALESCE(i.checked_at, '')) LIMIT ?`,
+  ).bind(minutesFromNow(-RECHECK_HOURS * 60), Math.min(SWEEP, budget.left)).all<Subscription & { item_id: string }>();
+  for (const { item_id, ...s } of results) {
+    budget.left--;
+    const doc = await fetchItem(s.origin, item_id);
+    if (!doc) {
+      await db.prepare("UPDATE imported SET checked_at = ? WHERE origin = ? AND item_id = ?").bind(now(), s.origin, item_id).run();
+      continue;
+    }
+    const { topics, seen } = await followers(db, s.origin);
+    if ((await applyDoc(db, bot, s, doc, topics, seen)) === "retry") return;
+  }
+}
+
 // One poll of one blyg: diff its archive index against each following topic's watermarks (§13.2).
 // Every changed item is fetched once, however many topics show it.
 async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left: number }) {
@@ -292,12 +342,7 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
   if (index.status === "unchanged") return { ok: true as const };
   if (index.status === "error") return { ok: false as const, error: index.error, retryAfter: index.retryAfter };
 
-  const topics = (await db.prepare("SELECT topic_id FROM follows WHERE origin = ? ORDER BY created").bind(s.origin).all<{ topic_id: number }>()).results
-    .map((f) => f.topic_id);
-  const { results } = await db.prepare("SELECT * FROM imported WHERE origin = ?")
-    .bind(s.origin).all<Imported>();
-  const seen: Seen = new Map(topics.map((t) => [t, new Map<string, Imported>()]));
-  for (const r of results) seen.get(r.topic_id)?.set(r.item_id, r);
+  const { topics, seen } = await followers(db, s.origin);
   // an item is behind when any following topic hasn't shown its current version
   const behind = (entry: IndexEntry, t: number) => entry.version > (seen.get(t)!.get(entry.id)?.version ?? 0);
   const changed = index.items
@@ -336,4 +381,5 @@ export async function pollDue(db: D1Database, bot: Bot) {
         .bind(now(), minutesFromNow(Math.max(backoff, retryAfter)), result.error, s.origin).run();
     }
   }
+  await sweep(db, bot, budget).catch((e) => console.error(`sweep: ${e}`));
 }

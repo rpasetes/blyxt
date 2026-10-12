@@ -84,3 +84,42 @@ test("a document lagging behind its index is fetched again next poll", async () 
   expect(db.sqlite.query("SELECT version FROM imported").get()).toEqual({ version: 2 });
   expect(notices(w)).toEqual([]);
 });
+
+const stale = (db: ReturnType<typeof d1>) => db.sqlite.exec("UPDATE imported SET checked_at = '1970-01-01T00:00:00Z'");
+
+test("a stealth edit is adopted and surfaced once, without moving the watermark", async () => {
+  const db = d1();
+  const w = world({ [A]: 1 }, { [A]: { version: 1, md: "before" } });
+  await addSubscription(db, SUB, ORIGIN, MANIFEST);
+  w.docs[A] = { version: 1, md: "after" };
+  for (let i = 0; i < 2; i++) { stale(db); due(db); await pollDue(db, BOT); }
+  expect(notices(w)).toEqual(["⚠ R changed this post without a new version (still v1). blyxt shows the new text; the change should have been v2."]);
+  expect(w.sent.some((s) => s.method === "editMessageText" && String(s.body.text).includes("after"))).toBe(true);
+  expect(db.sqlite.query("SELECT version, content_hash FROM imported").get()).toEqual({ version: 1, content_hash: await contentHash("after") });
+});
+
+test("a baseline item learns its hash quietly on its first recheck", async () => {
+  const db = d1();
+  const B = "0b000000000000000000000000";
+  const w = world({ [A]: 1, [B]: 1 }, { [A]: { version: 1 }, [B]: { version: 1, kind: "withdrawn" } });
+  await addSubscription(db, SUB, ORIGIN, MANIFEST);
+  w.docs[B] = { version: 1 };
+  db.sqlite.exec(`UPDATE imported SET kind = 'fragment' WHERE item_id = '${B}'`);
+  w.sent.length = 0;
+  due(db);
+  await pollDue(db, BOT);
+  expect(w.sent).toEqual([]);
+  expect(db.sqlite.query(`SELECT content_hash FROM imported WHERE item_id = '${B}'`).get()).toEqual({ content_hash: await contentHash(`${B} v1`) });
+});
+
+test("a content_hash that doesn't match content_md is surfaced, and the content shown anyway", async () => {
+  const db = d1();
+  const w = world({ [A]: 1 }, { [A]: { version: 1 } });
+  await addSubscription(db, SUB, ORIGIN, MANIFEST);
+  w.index = { [A]: 2 };
+  w.docs[A] = { version: 2, md: "new words", hash: "sha256:00" };
+  due(db);
+  await pollDue(db, BOT);
+  expect(notices(w)).toEqual(["⚠ R's v2 of this post doesn't match its own content_hash. it's shown anyway; the blyg's software has a bug."]);
+  expect(db.sqlite.query("SELECT version FROM imported").get()).toEqual({ version: 2 });
+});
