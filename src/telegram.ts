@@ -1,6 +1,7 @@
 // Telegram webhook: Pub topic publishes, Sub topic manages subscriptions.
 // Bot API: https://core.telegram.org/bots/api
 import { pagePath, type Site } from "./blyg";
+import { compose } from "./compose";
 import { resolve } from "./resolve";
 import { itemForMessage, publishEdit, publishNew } from "./store";
 import { addSubscription, getSubscription, listSubscriptions, POLL_MINUTES, removeSubscription } from "./subscribe";
@@ -28,7 +29,7 @@ export async function tg(token: string, method: string, body: unknown) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const data = (await res.json()) as { ok: boolean; result?: unknown; description?: string };
+  const data = (await res.json()) as { ok: boolean; result?: unknown; description?: string; error_code?: number; parameters?: { retry_after?: number } };
   if (!data.ok) console.error(`telegram ${method}: ${data.description}`);
   return data;
 }
@@ -56,7 +57,10 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   // Telegram retries webhooks; a message publishes at most once
   if (await itemForMessage(db, m.chat.id, m.message_id)) return null;
 
-  const item = await publishNew(db, "fragment", m.text.trim(), { chatId: m.chat.id, messageId: m.message_id });
+  const md = m.text.trim();
+  const composed = await compose(db, site.origin, md);
+  if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. fix it and send it again`);
+  const item = await publishNew(db, "fragment", md, composed.html, { chatId: m.chat.id, messageId: m.message_id });
   return () => reply(cfg, m, `published v1 → ${site.origin}${pagePath(item)}`);
 }
 
@@ -67,7 +71,10 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (!link) return null;
 
   // unchanged text (including Telegram retries) is not a new version
-  const item = await publishEdit(db, link.item_id, m.text.trim());
+  const md = m.text.trim();
+  const composed = await compose(db, site.origin, md);
+  if (!composed.ok) return () => reply(cfg, m, `edit not published: ${composed.error}. the post keeps its current version`);
+  const item = await publishEdit(db, link.item_id, md, composed.html);
   if (!item) return null;
   return () => reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
 }

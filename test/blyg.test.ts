@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { contentHash, excerpt, feed, ID_RE, itemDocument, newId, pagePath, render, type Item, type Site } from "../src/blyg";
+import { contentHash, directiveLines, excerpt, feed, ID_RE, itemDocument, linkIds, newId, pagePath, render, type Item, type Site } from "../src/blyg";
 
 const site: Site = { origin: "https://example.com/blyg/", title: "t", subtitle: "s", author: { name: "a", url: "https://example.com/" } };
 const item: Item = {
@@ -46,4 +46,32 @@ test("excerpt strips markup and truncates", () => {
 test("raw HTML in chat text is escaped", () => {
   expect(render("hi <script>x</script>")).not.toContain("<script>");
   expect(render("> quoted")).toContain("<blockquote>");
+});
+
+const A = "7c9wk2mhq0v3xj8tn5rzfd41bg";
+const B = "1vgtgz0gq5b2c9k7d3m8r4n6xy";
+
+test("[[id]] links resolve to absolute anchors; code and directive forms stay inert", () => {
+  const src = `see [[${A}]] and \`[[${B}]]\` and ![[${B}]] inline`;
+  expect(linkIds(src)).toEqual([A]);
+  const html = render(src, "https://example.com/blyg/", new Map([[A, { url: `https://example.com/blyg/f/${A}/`, label: "a post" }]]));
+  expect(html).toContain(`<a href="https://example.com/blyg/f/${A}/">a post</a>`);
+  expect(html).toContain(`<code>[[${B}]]</code>`);
+  expect(html).toContain(`![[${B}]] inline`);
+});
+
+test("directive lines are found outside code only", () => {
+  expect(directiveLines(`intro\n![[${A}]]\n\n\`\`\`\n![[${B}]]\n\`\`\`\n\n  ![[${B}@v2]]  `)).toEqual([
+    { id: A, versioned: false },
+    { id: B, versioned: true },
+  ]);
+  expect(directiveLines(`text ![[${A}]] text`)).toEqual([]);
+});
+
+test("relative URLs in content_html become absolute", () => {
+  const html = render("[home](/) [rel](notes/x?a=1&b=2) [abs](https://x.example/) [mail](mailto:a@b.c)", "https://example.com/blyg/");
+  expect(html).toContain('href="https://example.com/"');
+  expect(html).toContain('href="https://example.com/blyg/notes/x?a=1&amp;b=2"');
+  expect(html).toContain('href="https://x.example/"');
+  expect(html).toContain('href="mailto:a@b.c"');
 });

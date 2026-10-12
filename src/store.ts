@@ -1,4 +1,4 @@
-import { contentHash, newId, now, render, type Item, type Kind, type Version } from "./blyg";
+import { contentHash, newId, now, type Item, type Kind, type Version } from "./blyg";
 
 export async function listItems(db: D1Database) {
   const { results } = await db.prepare("SELECT * FROM items ORDER BY updated DESC, id").all<Item>();
@@ -33,7 +33,8 @@ export const itemForMessage = (db: D1Database, chatId: number, messageId: number
   db.prepare("SELECT item_id FROM tg_messages WHERE chat_id = ? AND message_id = ?").bind(chatId, messageId).first<{ item_id: string }>();
 
 // new item at v1, linked to the Telegram message that wrote it
-export async function publishNew(db: D1Database, kind: Kind, md: string, source: { chatId: number; messageId: number }) {
+// html comes from compose(), which resolves links and makes URLs absolute
+export async function publishNew(db: D1Database, kind: Kind, md: string, html: string, source: { chatId: number; messageId: number }) {
   const at = now();
   const item: Item = {
     id: newId(),
@@ -42,7 +43,7 @@ export async function publishNew(db: D1Database, kind: Kind, md: string, source:
     updated: at,
     version: 1,
     content_md: md,
-    content_html: render(md),
+    content_html: html,
     content_hash: await contentHash(md),
   };
   await db.batch([
@@ -57,7 +58,7 @@ export async function publishNew(db: D1Database, kind: Kind, md: string, source:
 }
 
 // next version of an existing item; returns null when the text didn't change
-export async function publishEdit(db: D1Database, id: string, md: string) {
+export async function publishEdit(db: D1Database, id: string, md: string, html: string) {
   const item = await getItem(db, id);
   if (!item || item.kind === "withdrawn" || item.content_md === md) return null;
   const at = now();
@@ -66,7 +67,7 @@ export async function publishEdit(db: D1Database, id: string, md: string) {
     updated: at,
     version: item.version + 1,
     content_md: md,
-    content_html: render(md),
+    content_html: html,
     content_hash: await contentHash(md),
   };
   await db.batch([

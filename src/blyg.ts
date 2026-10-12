@@ -58,9 +58,59 @@ export async function contentHash(md: string) {
 export const esc = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+// [[id]] is a plain internal link; ![[id]] and [[id@vN]] inline are inert text (§10.1)
+const LINK = /^(!?)\[\[([0-9a-z]{26})(@v\d+)?\]\]/;
+const DIRECTIVE_LINE = /^\s*!\[\[([0-9a-z]{26})(@v\d+)?\]\]\s*$/;
+type LinkToken = { type: "blygLink"; raw: string; id: string; live: boolean };
+export type LinkTarget = { url: string; label: string };
+
+// set synchronously around each parse, so concurrent requests never see each other's targets
+let linkTargets = new Map<string, LinkTarget>();
+
 // chat text is plain text: raw HTML is shown, never interpreted; line breaks are kept
-const md = new Marked({ breaks: true, renderer: { html: ({ text }) => esc(text) } });
-export const render = (src: string) => md.parse(src, { async: false }) as string;
+const md = new Marked({
+  breaks: true,
+  renderer: { html: ({ text }) => esc(text) },
+  extensions: [{
+    name: "blygLink",
+    level: "inline",
+    start: (src: string) => { const i = src.search(/!?\[\[/); return i < 0 ? undefined : i; },
+    tokenizer(src: string): LinkToken | undefined {
+      const m = LINK.exec(src);
+      if (m) return { type: "blygLink", raw: m[0], id: m[2], live: !m[1] && !m[3] };
+    },
+    renderer(token) {
+      const t = token as LinkToken;
+      const target = t.live ? linkTargets.get(t.id) : undefined;
+      return target ? `<a href="${esc(target.url)}">${esc(target.label)}</a>` : esc(t.raw);
+    },
+  }],
+});
+
+// every URL in content_html must be absolute: it travels to feeds, readers and other blygs (§5.2)
+export function render(src: string, origin = "https://invalid./", targets = new Map<string, LinkTarget>()) {
+  linkTargets = targets;
+  try {
+    return absolutize(md.parse(src, { async: false }) as string, origin);
+  } finally {
+    linkTargets = new Map();
+  }
+}
+
+// ids named by [[id]] links outside code
+export function linkIds(src: string) {
+  const ids = new Set<string>();
+  md.walkTokens(md.lexer(src), (t) => { if (t.type === "blygLink" && (t as LinkToken).live) ids.add((t as LinkToken).id); });
+  return [...ids];
+}
+
+// lines consisting solely of ![[id]] (transclusion directives), outside code
+export function directiveLines(src: string) {
+  return md.lexer(src)
+    .filter((t) => t.type === "paragraph")
+    .flatMap((t) => t.raw.split("\n").map((line) => DIRECTIVE_LINE.exec(line)).filter((m) => m !== null))
+    .map((m) => ({ id: m[1], versioned: !!m[2] }));
+}
 const cdata = (s: string) => `<![CDATA[${s.replace(/]]>/g, "]]]]><![CDATA[>")}]]>`;
 const rfc822 = (iso: string) => new Date(iso).toUTCString();
 
@@ -153,7 +203,7 @@ ${entries.join("\n")}
 }
 
 function absolutize(html: string, origin: string) {
-  return html.replace(/(src|href)="(?![a-z]+:|#|\/\/)([^"]*)"/g, (_, attr, url) => `${attr}="${new URL(url, origin).href}"`);
+  return html.replace(/(src|href)="(?![a-z][a-z0-9+.-]*:|#)([^"]*)"/gi, (_, attr, url) => `${attr}="${esc(new URL(url.replace(/&amp;/g, "&"), origin).href)}"`);
 }
 
 function layout(site: Site, title: string, head: string, body: string) {
