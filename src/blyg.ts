@@ -47,6 +47,9 @@ export type Version = {
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 export const ID_RE = /^[0-9a-hjkmnp-tv-z]{26}$/;
 export const FEED_WINDOW = 50;
+// fragments SHOULD stay within 2,000 characters; threads have no cap (§5.3, §10.5)
+export const FRAGMENT_CAP = 2000;
+export const overCap = (md: string) => [...md].length > FRAGMENT_CAP;
 
 export const now = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 

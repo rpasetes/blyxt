@@ -1,6 +1,6 @@
 // Telegram webhook: Pub topic publishes, Sub topics manage subscriptions.
 // Bot API: https://core.telegram.org/bots/api
-import { ID_RE, pagePath, type Site } from "./blyg";
+import { FRAGMENT_CAP, ID_RE, overCap, pagePath, type Site } from "./blyg";
 import { compose } from "./compose";
 import { resolve } from "./resolve";
 import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, withdraw } from "./store";
@@ -88,9 +88,11 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   const md = (prefix ?? "") + m.text.trim();
   const composed = await compose(db, site.origin, md);
   if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. fix it and send it again`);
-  const kind = composed.thread ? "thread" : "fragment";
+  // a message too long for a fragment becomes a thread, which has no cap
+  const long = !composed.thread && overCap(md);
+  const kind = composed.thread || long ? "thread" : "fragment";
   const item = await publishNew(db, kind, { md, html: composed.html, transclusions: composed.transclusions }, { chatId: m.chat.id, messageId: m.message_id, prefix });
-  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1 → ${site.origin}${pagePath(item)}`);
+  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${long ? ` (over ${FRAGMENT_CAP.toLocaleString("en")} characters)` : ""} → ${site.origin}${pagePath(item)}`);
 }
 
 // replying in Pub to one of your posts quotes it: the reply becomes a thread that opens with ![[id]],
@@ -114,6 +116,9 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (!composed.ok) return () => reply(cfg, m, `edit not published: ${composed.error}. the post keeps its current version`);
   // the kind is fixed when a post is first published: it decides the page's address
   const current = await getItem(db, link.item_id);
+  if (current?.authored_kind === "fragment" && overCap(md)) {
+    return () => reply(cfg, m, `edit not published: fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters, and this is ${[...md].length.toLocaleString("en")}. trim it, or send it as a new message to publish a thread`);
+  }
   if (composed.thread && current?.authored_kind === "fragment") {
     return () => reply(cfg, m, "edit not published: a fragment can't quote. send it as a new message (or reply to the post you're quoting)");
   }
@@ -167,6 +172,7 @@ async function handleRepublish(m: TgMessage, id: string, note: string | null, db
   const composed = await compose(db, site.origin, md, id);
   if (!composed.ok) return () => reply(cfg, m, `not republished: ${composed.error}. edit the post, then /republish again`);
   if (composed.thread && item.authored_kind === "fragment") return () => reply(cfg, m, "not republished: a fragment can't quote. edit out the ![[id]] line, then /republish again");
+  if (item.authored_kind === "fragment" && overCap(md)) return () => reply(cfg, m, `not republished: fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters. trim the post, then /republish again`);
   const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions }, note);
   if (!next) return null;
   return () => reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);
