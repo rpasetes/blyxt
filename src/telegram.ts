@@ -161,20 +161,23 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
 }
 
 // a withdrawn post comes back as its next version: the replied-to message's text as it reads now,
-// else the last content it published
+// else the last content it published, with its generation disclosure
+// (a draft's preview is the bot's message, not the post's text, so only your own messages count)
 async function handleRepublish(m: TgMessage, id: string, note: string | null, db: D1Database, site: Site, cfg: Config) {
   const item = await getItem(db, id);
   if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
   if (item.kind !== "withdrawn") return () => reply(cfg, m, `this post isn't withdrawn (it's at v${item.version})`);
   const repliedTo = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
-  const text = repliedTo?.item_id === id && m.reply_to_message?.text?.trim();
-  const md = text ? (repliedTo.prefix ?? "") + text : (await lastContent(db, id))?.content_md;
+  const text = repliedTo?.item_id === id && m.reply_to_message?.from?.id === cfg.ownerId && m.reply_to_message.text?.trim();
+  const last = text ? null : await lastContent(db, id);
+  const md = text ? (repliedTo.prefix ?? "") + text : last?.content_md;
   if (!md) return () => reply(cfg, m, "nothing to republish: this post never had content");
   const composed = await compose(db, site.origin, md, id);
   if (!composed.ok) return () => reply(cfg, m, `not republished: ${composed.error}. edit the post, then /republish again`);
   if (composed.thread && item.authored_kind === "fragment") return () => reply(cfg, m, "not republished: a fragment can't quote. edit out the ![[id]] line, then /republish again");
   if (item.authored_kind === "fragment" && overCap(md)) return () => reply(cfg, m, `not republished: fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters. trim the post, then /republish again`);
-  const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions }, note);
+  const generated = last?.generated ? JSON.parse(last.generated) : undefined;
+  const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions, generated }, note);
   if (!next) return null;
   return () => reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);
 }

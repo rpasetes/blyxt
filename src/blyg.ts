@@ -25,6 +25,15 @@ export type Item = {
   content_hash: string;
   // threads only: JSON of the transclusions baked into this version (§10.3)
   transclusions?: string | null;
+  // JSON of the generated[] entries this version disclosed, or null (§5.7)
+  generated?: string | null;
+};
+
+// one machine-generated span's provenance (§5.7): own-origin sources at 0.3, never instruction text
+export type Generated = {
+  sources: { id: string; version: number }[];
+  model?: string;
+  at?: string;
 };
 
 // a reference to the exact version a thread baked (§10.3); origin only for remote sources
@@ -145,6 +154,9 @@ function lex(src: string) {
   return { tokens, directives };
 }
 
+// the renderer marks a generated span (§5.7); blyxt's spans are whole bodies, so block output
+export const generatedBlock = (html: string) => `<div class="blyg-tk-gen">\n${html}</div>\n`;
+
 // every URL in content_html must be absolute: it travels to feeds, readers and other blygs (§5.2)
 export function render(src: string, origin = "https://invalid./", links = new Map<string, LinkTarget>(), quotes = new Map<string, Snapshot>()) {
   context = { links, quotes };
@@ -215,6 +227,8 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
     media: [],
     // threads always carry it, a withdrawn thread's endcap as []; fragments omit it (§10.3)
     ...(item.authored_kind === "thread" ? { transclusions: item.kind === "withdrawn" ? [] : JSON.parse(item.transclusions ?? "[]") } : {}),
+    // omitted when the version involved no generation; an endcap never carries it (§5.7)
+    ...(item.generated && item.kind !== "withdrawn" ? { generated: JSON.parse(item.generated) } : {}),
     changelog: changelog.map((c) => ({
       version: c.version,
       at: c.at,
@@ -225,7 +239,7 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
 }
 
 // items/{id}/v{n}.json: one pinned version, frozen (§8)
-export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions">) {
+export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions" | "generated">) {
   return {
     blyg: "0.3",
     id: v.item_id,
@@ -240,6 +254,8 @@ export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" 
     content_html: absolutize(v.content_html, site.origin),
     content_hash: v.content_hash,
     ...(v.kind === "thread" ? { transclusions: JSON.parse(v.transclusions ?? "[]") } : {}),
+    // a citation includes its provenance (§5.7)
+    ...(v.generated ? { generated: JSON.parse(v.generated) } : {}),
   };
 }
 
