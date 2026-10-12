@@ -3,3 +3,4 @@ node_modules/
 .dev.vars
 .DS_Store
 .cloudflare.env
+.claude/settings.local.json
