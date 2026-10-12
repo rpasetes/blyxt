@@ -1,6 +1,7 @@
 // Blygger 0.3 wire surface: ids, rendering, and the static documents.
 // Spec: https://blygger.org/spec/0.3/2026-09-28/
-import { Marked } from "marked";
+import { Marked, type Token, type Tokens } from "marked";
+import { decode } from "./tghtml";
 
 export type Kind = "fragment" | "thread" | "withdrawn";
 export type AuthoredKind = Exclude<Kind, "withdrawn">;
@@ -22,6 +23,16 @@ export type Item = {
   content_md: string;
   content_html: string;
   content_hash: string;
+  // threads only: JSON of the transclusions baked into this version (§10.3)
+  transclusions?: string | null;
+};
+
+// a reference to the exact version a thread baked (§10.3); origin only for remote sources
+export type Transclusion = {
+  id: string;
+  version: number;
+  origin?: string;
+  selector?: { exact: string; prefix?: string; suffix?: string };
 };
 
 export type Version = {
@@ -62,12 +73,17 @@ export const esc = (s: string) =>
 
 // [[id]] is a plain internal link; ![[id]] and [[id@vN]] inline are inert text (§10.1)
 const LINK = /^(!?)\[\[([0-9a-z]{26})(@v\d+)?\]\]/;
-const DIRECTIVE_LINE = /^\s*!\[\[([0-9a-z]{26})(@v\d+)?\]\]\s*$/;
+// a line that is only ![[id]] is a transclusion directive; blank lines after it detach a following blockquote
+const DIRECTIVE = /^[ \t]*!\[\[([0-9a-z]{26})(@v\d+)?\]\][ \t]*(?:\n|$)((?:[ \t]*\n)*)/;
 type LinkToken = { type: "blygLink"; raw: string; id: string; live: boolean };
+type DirectiveToken = { type: "blygDirective"; raw: string; id: string; versioned: boolean; detached: boolean; live?: boolean; selection?: string };
 export type LinkTarget = { url: string; label: string };
+// what a directive bakes: the source's html at the version the publisher holds (§10.2)
+export type Snapshot = { version: number; html: string; origin?: string };
+type Context = { links: Map<string, LinkTarget>; quotes: Map<string, Snapshot> };
 
-// set synchronously around each parse, so concurrent requests never see each other's targets
-let linkTargets = new Map<string, LinkTarget>();
+// set synchronously around each parse, so concurrent requests never see each other's context
+let context: Context = { links: new Map(), quotes: new Map() };
 
 // chat text is plain text: raw HTML is shown, never interpreted; line breaks are kept
 const md = new Marked({
@@ -83,35 +99,75 @@ const md = new Marked({
     },
     renderer(token) {
       const t = token as LinkToken;
-      const target = t.live ? linkTargets.get(t.id) : undefined;
+      const target = t.live ? context.links.get(t.id) : undefined;
       return target ? `<a href="${esc(target.url)}">${esc(target.label)}</a>` : esc(t.raw);
+    },
+  }, {
+    name: "blygDirective",
+    level: "block",
+    // lets a directive line interrupt a paragraph
+    start: (src: string) => { const m = /(^|\n)[ \t]*!\[\[[0-9a-z]{26}(@v\d+)?\]\][ \t]*(\n|$)/.exec(src); return m ? m.index + m[1].length : undefined; },
+    tokenizer(src: string): DirectiveToken | undefined {
+      const m = DIRECTIVE.exec(src);
+      if (m) return { type: "blygDirective", raw: m[0], id: m[1], versioned: !!m[2], detached: !!m[3] };
+    },
+    renderer(token) {
+      const t = token as DirectiveToken;
+      const snap = t.live ? context.quotes.get(t.id) : undefined;
+      // only top-level lines are directives; one inside a quote or list is text
+      if (!snap) return `<p>${esc(t.raw.trim())}</p>\n`;
+      const attrs = `data-blyg-id="${t.id}" data-blyg-version="${snap.version}"${snap.origin ? ` data-blyg-origin="${esc(snap.origin)}"` : ""}`;
+      if (t.selection === undefined) return `<blockquote class="blyg-transclusion" ${attrs}>${snap.html}</blockquote>\n`;
+      return `<blockquote class="blyg-transclusion blyg-partial" ${attrs}>\n${t.selection.split("\n").map((l) => `<p>${esc(l)}</p>`).join("\n")}\n</blockquote>\n`;
     },
   }],
 });
 
+// top-level directives, in order; a blockquote attached to one (no blank line) becomes its selection
+function lex(src: string) {
+  const tokens = md.lexer(src);
+  const directives: DirectiveToken[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i] as Token | DirectiveToken;
+    if (t.type !== "blygDirective") continue;
+    const d = t as DirectiveToken;
+    d.live = true;
+    const next = tokens[i + 1];
+    if (!d.detached && next?.type === "blockquote") {
+      d.selection = textContent(md.parser((next as Tokens.Blockquote).tokens));
+      tokens.splice(i + 1, 1);
+    }
+    directives.push(d);
+  }
+  return { tokens, directives };
+}
+
 // every URL in content_html must be absolute: it travels to feeds, readers and other blygs (§5.2)
-export function render(src: string, origin = "https://invalid./", targets = new Map<string, LinkTarget>()) {
-  linkTargets = targets;
+export function render(src: string, origin = "https://invalid./", links = new Map<string, LinkTarget>(), quotes = new Map<string, Snapshot>()) {
+  context = { links, quotes };
   try {
-    return absolutize(md.parse(src, { async: false }) as string, origin);
+    return absolutize(md.parser(lex(src).tokens), origin);
   } finally {
-    linkTargets = new Map();
+    context = { links: new Map(), quotes: new Map() };
   }
 }
 
 // ids named by [[id]] links outside code
 export function linkIds(src: string) {
   const ids = new Set<string>();
-  md.walkTokens(md.lexer(src), (t) => { if (t.type === "blygLink" && (t as LinkToken).live) ids.add((t as LinkToken).id); });
+  md.walkTokens(lex(src).tokens, (t) => { if (t.type === "blygLink" && (t as LinkToken).live) ids.add((t as LinkToken).id); });
   return [...ids];
 }
 
-// lines consisting solely of ![[id]] (transclusion directives), outside code
-export function directiveLines(src: string) {
-  return md.lexer(src)
-    .filter((t) => t.type === "paragraph")
-    .flatMap((t) => t.raw.split("\n").map((line) => DIRECTIVE_LINE.exec(line)).filter((m) => m !== null))
-    .map((m) => ({ id: m[1], versioned: !!m[2] }));
+// transclusion directives outside code, in order (§10.1)
+export function directives(src: string) {
+  return lex(src).directives.map(({ id, versioned, selection }) => ({ id, versioned, selection }));
+}
+
+// §10.2's text content: tags stripped, whitespace collapsed within a block, block boundaries as line breaks
+export function textContent(html: string) {
+  return decode(html.replace(/\s+/g, " ").replace(/<\/?(p|div|h[1-6]|li|ul|ol|blockquote|pre|tr|table|hr|br|figure|figcaption|section|article)\b[^>]*>/gi, "\n").replace(/<[^>]*>/g, ""))
+    .split("\n").map((l) => l.replace(/[^\S\n]+/g, " ").trim()).filter(Boolean).join("\n");
 }
 const cdata = (s: string) => `<![CDATA[${s.replace(/]]>/g, "]]]]><![CDATA[>")}]]>`;
 const rfc822 = (iso: string) => new Date(iso).toUTCString();
@@ -154,6 +210,8 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
     content_html: item.content_html,
     content_hash: item.content_hash,
     media: [],
+    // threads always carry it, a withdrawn thread's endcap as []; fragments omit it (§10.3)
+    ...(item.authored_kind === "thread" ? { transclusions: item.kind === "withdrawn" ? [] : JSON.parse(item.transclusions ?? "[]") } : {}),
     changelog: changelog.map((c) => ({
       version: c.version,
       at: c.at,
@@ -164,7 +222,7 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
 }
 
 // items/{id}/v{n}.json: one pinned version, frozen (§8)
-export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash">) {
+export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions">) {
   return {
     blyg: "0.3",
     id: v.item_id,
@@ -178,6 +236,7 @@ export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" 
     content_md: v.content_md,
     content_html: absolutize(v.content_html, site.origin),
     content_hash: v.content_hash,
+    ...(v.kind === "thread" ? { transclusions: JSON.parse(v.transclusions ?? "[]") } : {}),
   };
 }
 
@@ -242,7 +301,9 @@ ${head}
     a { color: #a0451f; } .meta { font: 13px/1.4 ui-monospace, monospace; color: #777; }
     article { border-bottom: 1px solid #e5e0d5; padding: 1rem 0; }
     blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid #e5e0d5; }
-    @media (prefers-color-scheme: dark) { body { color: #ddd; background: #161512; } a { color: #e08a5f; } article { border-color: #333; } }
+    .blyg-transclusion { margin: 1rem 0; padding: .1rem 1rem; background: #f4f1e8; border-left-color: #a0451f; }
+    .blyg-partial { font-style: italic; }
+    @media (prefers-color-scheme: dark) { body { color: #ddd; background: #161512; } a { color: #e08a5f; } article { border-color: #333; } .blyg-transclusion { background: #1f1d19; border-left-color: #e08a5f; } }
   </style>
 </head>
 <body>

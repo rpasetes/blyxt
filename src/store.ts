@@ -1,4 +1,4 @@
-import { contentHash, newId, now, type AuthoredKind, type Item, type Version } from "./blyg";
+import { contentHash, newId, now, type AuthoredKind, type Item, type Kind, type Transclusion, type Version } from "./blyg";
 
 export async function listItems(db: D1Database) {
   const { results } = await db.prepare("SELECT * FROM items ORDER BY updated DESC, id").all<Item>();
@@ -32,11 +32,17 @@ export async function lastUpdated(db: D1Database) {
 }
 
 export const itemForMessage = (db: D1Database, chatId: number, messageId: number) =>
-  db.prepare("SELECT item_id FROM tg_messages WHERE chat_id = ? AND message_id = ?").bind(chatId, messageId).first<{ item_id: string }>();
+  db.prepare("SELECT item_id, prefix FROM tg_messages WHERE chat_id = ? AND message_id = ?").bind(chatId, messageId).first<{ item_id: string; prefix: string | null }>();
 
-// new item at v1, linked to the Telegram message that wrote it
-// html comes from compose(), which resolves links and makes URLs absolute
-export async function publishNew(db: D1Database, kind: AuthoredKind, md: string, html: string, source: { chatId: number; messageId: number }) {
+// what a publish event says; html and transclusions come from compose(), which resolves and bakes
+export type Content = { md: string; html: string; transclusions: Transclusion[] };
+const EMPTY: Content = { md: "", html: "", transclusions: [] };
+
+// threads record their transclusions on every version; fragments never carry the key (§10.3)
+const transclusionsOf = (kind: AuthoredKind, c: Content) => (kind === "thread" ? JSON.stringify(c.transclusions) : null);
+
+// new item at v1, linked to the Telegram message that wrote it (and the quote blyxt prefixed, for a reply)
+export async function publishNew(db: D1Database, kind: AuthoredKind, c: Content, source: { chatId: number; messageId: number; prefix?: string }) {
   const at = now();
   const item: Item = {
     id: newId(),
@@ -45,41 +51,51 @@ export async function publishNew(db: D1Database, kind: AuthoredKind, md: string,
     created: at,
     updated: at,
     version: 1,
-    content_md: md,
-    content_html: html,
-    content_hash: await contentHash(md),
+    content_md: c.md,
+    content_html: c.html,
+    content_hash: await contentHash(c.md),
+    transclusions: transclusionsOf(kind, c),
   };
   await db.batch([
-    db.prepare("INSERT INTO items (id, kind, authored_kind, created, updated, version, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, item.kind, item.authored_kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)")
-      .bind(item.id, 1, item.kind, at, item.content_md, item.content_html, item.content_hash),
-    db.prepare("INSERT INTO tg_messages (chat_id, message_id, item_id) VALUES (?, ?, ?)")
-      .bind(source.chatId, source.messageId, item.id),
+    db.prepare("INSERT INTO items (id, kind, authored_kind, created, updated, version, content_md, content_html, content_hash, transclusions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, item.kind, item.authored_kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash, item.transclusions),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash, transclusions) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)")
+      .bind(item.id, 1, item.kind, at, item.content_md, item.content_html, item.content_hash, item.transclusions),
+    db.prepare("INSERT INTO tg_messages (chat_id, message_id, item_id, prefix) VALUES (?, ?, ?, ?)")
+      .bind(source.chatId, source.messageId, item.id, source.prefix ?? null),
   ]);
   return item;
 }
 
-// next version of an existing item; returns null when the text didn't change
-export async function publishEdit(db: D1Database, id: string, md: string, html: string) {
-  const item = await getItem(db, id);
-  if (!item || item.kind === "withdrawn" || item.content_md === md) return null;
+// the next version of an item; the WHERE version guard and the versions primary key make a racing publish fail whole
+async function bump(db: D1Database, item: Item, kind: Kind, c: Content, note: string | null) {
   const at = now();
   const next: Item = {
     ...item,
+    kind,
     updated: at,
     version: item.version + 1,
-    content_md: md,
-    content_html: html,
-    content_hash: await contentHash(md),
+    content_md: c.md,
+    content_html: c.html,
+    content_hash: await contentHash(c.md),
+    // a withdrawn thread's endcap carries [] (§9)
+    transclusions: transclusionsOf(item.authored_kind, c),
   };
   await db.batch([
-    db.prepare("UPDATE items SET updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ? WHERE id = ? AND version = ?")
-      .bind(next.updated, next.version, next.content_md, next.content_html, next.content_hash, id, item.version),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)")
-      .bind(id, next.version, next.kind, at, next.content_md, next.content_html, next.content_hash),
+    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ?, transclusions = ? WHERE id = ? AND version = ?")
+      .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, next.transclusions, item.id, item.version),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash, transclusions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, next.version, next.kind, at, note, next.content_md, next.content_html, next.content_hash, next.transclusions),
   ]);
   return next;
+}
+
+// next version of a published item; null when the text didn't change or the item is withdrawn
+// (a thread re-resolves on every publish, so unchanged text is still unchanged content: snapshots refresh on the next edit)
+export async function publishEdit(db: D1Database, id: string, c: Content) {
+  const item = await getItem(db, id);
+  if (!item || item.kind === "withdrawn" || item.content_md === c.md) return null;
+  return bump(db, item, item.kind, c, null);
 }
 
 // the endcap (§9): a version bump with the content emptied; the page and changelog stay
@@ -87,26 +103,21 @@ export async function publishEdit(db: D1Database, id: string, md: string, html: 
 export async function withdraw(db: D1Database, id: string, note: string | null) {
   const item = await getItem(db, id);
   if (!item || item.kind === "withdrawn") return null;
-  const at = now();
-  const next: Item = {
-    ...item,
-    kind: "withdrawn",
-    updated: at,
-    version: item.version + 1,
-    content_md: "",
-    content_html: "",
-    content_hash: await contentHash(""),
-  };
-  await db.batch([
-    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = '', content_html = '', content_hash = ? WHERE id = ? AND version = ?")
-      .bind(next.kind, next.updated, next.version, next.content_hash, id, item.version),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, 'withdrawn', ?, ?, '', '', ?)")
-      .bind(id, next.version, at, note, next.content_hash),
-  ]);
-  return next;
+  return bump(db, item, "withdrawn", EMPTY, note);
 }
 
-export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string };
+// the last content a withdrawn item published, to bring it back with
+export const lastContent = (db: D1Database, id: string) =>
+  db.prepare("SELECT content_md FROM versions WHERE item_id = ? AND kind != 'withdrawn' ORDER BY version DESC LIMIT 1").bind(id).first<{ content_md: string }>();
+
+// a withdrawn item returns under its id: vN+1 with its authored kind (§9); null unless it is withdrawn
+export async function republish(db: D1Database, id: string, c: Content, note: string | null) {
+  const item = await getItem(db, id);
+  if (!item || item.kind !== "withdrawn") return null;
+  return bump(db, item, item.authored_kind, c, note);
+}
+
+export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string; transclusions: string | null };
 
 // a pinned version's content, or null: unpinned history is never served (§8)
 export const getPinned = (db: D1Database, id: string, version: number) =>
@@ -120,31 +131,4 @@ export async function pin(db: D1Database, id: string, version: number) {
   if (row.pinned) return "already" as const;
   await db.prepare("UPDATE versions SET pinned = 1 WHERE item_id = ? AND version = ?").bind(id, version).run();
   return "pinned" as const;
-}
-
-// the last content a withdrawn item published, to bring it back with
-export const lastContent = (db: D1Database, id: string) =>
-  db.prepare("SELECT content_md FROM versions WHERE item_id = ? AND kind != 'withdrawn' ORDER BY version DESC LIMIT 1").bind(id).first<{ content_md: string }>();
-
-// a withdrawn item returns under its id: vN+1 with its authored kind (§9); null unless it is withdrawn
-export async function republish(db: D1Database, id: string, md: string, html: string, note: string | null) {
-  const item = await getItem(db, id);
-  if (!item || item.kind !== "withdrawn") return null;
-  const at = now();
-  const next: Item = {
-    ...item,
-    kind: item.authored_kind,
-    updated: at,
-    version: item.version + 1,
-    content_md: md,
-    content_html: html,
-    content_hash: await contentHash(md),
-  };
-  await db.batch([
-    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ? WHERE id = ? AND version = ?")
-      .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, id, item.version),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(id, next.version, next.kind, at, note, next.content_md, next.content_html, next.content_hash),
-  ]);
-  return next;
 }
