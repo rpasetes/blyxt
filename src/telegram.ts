@@ -1,14 +1,24 @@
-// Telegram webhook: Pub topic publishes, Sub topic manages subscriptions.
+// Telegram webhook: Pub topic publishes, Sub topics manage subscriptions.
 // Bot API: https://core.telegram.org/bots/api
 import { ID_RE, pagePath, type Site } from "./blyg";
 import { compose } from "./compose";
 import { resolve } from "./resolve";
 import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, withdraw } from "./store";
-import { addSubscription, getSubscription, listSubscriptions, POLL_MINUTES, removeSubscription } from "./subscribe";
+import {
+  addSubscription,
+  getSubscription,
+  getSubTopic,
+  listAllSubscriptions,
+  listSubscriptions,
+  nameSubTopic,
+  POLL_MINUTES,
+  removeSubscription,
+} from "./subscribe";
 
 export type TgMessage = {
   message_id: number;
   message_thread_id?: number;
+  is_topic_message?: boolean;
   from?: { id: number };
   chat: { id: number };
   text?: string;
@@ -21,6 +31,7 @@ export type Config = {
   token: string;
   chatId: number;
   pubTopicId: number;
+  // the home Sub topic; more are registered with /newsub and /sub
   subTopicId: number;
   ownerId: number;
 };
@@ -50,10 +61,20 @@ const inTopic = (cfg: Config, m: TgMessage, topicId: number) =>
   m.chat.id === cfg.chatId && m.message_thread_id === topicId && m.from?.id === cfg.ownerId;
 const inPub = (cfg: Config, m: TgMessage) => inTopic(cfg, m, cfg.pubTopicId);
 
+const commandName = (text: string) => text.trim().split(/\s+/)[0].slice(1).split("@")[0].toLowerCase();
+
+// Sub commands work in the home Sub topic and any registered grouping; /sub adopts any other topic but Pub
+async function inSub(db: D1Database, cfg: Config, m: TgMessage) {
+  const topicId = m.message_thread_id;
+  if (m.chat.id !== cfg.chatId || m.from?.id !== cfg.ownerId || !topicId || topicId === cfg.pubTopicId) return false;
+  if (topicId === cfg.subTopicId || (await getSubTopic(db, topicId))) return true;
+  return !!m.is_topic_message && commandName(m.text!) === "sub";
+}
+
 export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site, cfg: Config) {
   if (update.edited_message) return handleEdit(update.edited_message, db, site, cfg);
   const m = update.message;
-  if (m?.text && inTopic(cfg, m, cfg.subTopicId) && m.text.startsWith("/")) return () => handleSubCommand(m, db, cfg);
+  if (m?.text?.startsWith("/") && (await inSub(db, cfg, m))) return () => handleSubCommand(m, db, cfg);
   if (m?.pinned_message && inPub(cfg, m)) return handlePin(m, m.pinned_message, null, db, site, cfg);
   if (!m?.text || !inPub(cfg, m)) return null;
   if (m.text.startsWith("/")) return handlePubCommand(m, db, site, cfg);
@@ -151,18 +172,50 @@ async function handlePin(m: TgMessage, pinned: TgMessage | null, id: string | nu
   return () => reply(cfg, m, `pinned v${version} → ${page}v${version}/\nthis version stays readable forever, through edits and withdrawal. a pin can't be undone; unpinning in Telegram doesn't change it`);
 }
 
-const USAGE = "/subscribe <url> · /unsubscribe <url> · /subscriptions";
+const USAGE = "/subscribe <url> · /unsubscribe <url> · /subscriptions · /newsub <name> · /sub <name>";
 
 async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
-  const [command, ...args] = m.text!.trim().split(/\s+/);
-  const name = command.slice(1).split("@")[0].toLowerCase();
+  const [, ...args] = m.text!.trim().split(/\s+/);
+  const name = commandName(m.text!);
   const arg = args[0];
-  const sub = { token: cfg.token, chatId: cfg.chatId, topicId: cfg.subTopicId };
+  const sub = { token: cfg.token, chatId: cfg.chatId, topicId: m.message_thread_id! };
+  const home = sub.topicId === cfg.subTopicId;
 
   if (name === "subscriptions") {
-    const subs = await listSubscriptions(db, sub.topicId);
-    const lines = subs.map((s) => `• ${s.title} — ${s.origin}${s.last_error ? ` (failing: ${s.last_error})` : ""}`);
-    return reply(cfg, m, subs.length ? lines.join("\n") : `no subscriptions yet. ${USAGE}`);
+    const line = (s: { title?: string; origin?: string; last_error?: string | null }) =>
+      `• ${s.title} — ${s.origin}${s.last_error ? ` (failing: ${s.last_error})` : ""}`;
+    if (!home) {
+      const subs = await listSubscriptions(db, sub.topicId);
+      return reply(cfg, m, subs.length ? subs.map(line).join("\n") : `no subscriptions here yet. ${USAGE}`);
+    }
+    // the home topic shows every grouping
+    const groups = new Map<string, string[]>();
+    for (const row of await listAllSubscriptions(db)) {
+      const label = row.topic_id === cfg.subTopicId ? `${row.name} (here)` : row.name;
+      groups.set(label, [...(groups.get(label) ?? []), ...(row.origin ? [line(row)] : [])]);
+    }
+    const text = [...groups].map(([label, lines]) => `${label}\n${lines.join("\n") || "(nothing yet)"}`).join("\n\n");
+    return reply(cfg, m, text || `no subscriptions yet. ${USAGE}`);
+  }
+
+  if (name === "newsub") {
+    const topicName = args.join(" ");
+    if (!topicName) return reply(cfg, m, "usage: /newsub <name> — creates a topic that follows its own blygs");
+    const created = await tg(cfg.token, "createForumTopic", { chat_id: cfg.chatId, name: topicName });
+    if (!created.ok) return reply(cfg, m, `couldn't create the topic: ${created.description}. the bot needs the "manage topics" admin right`);
+    const topicId = (created.result as { message_thread_id: number }).message_thread_id;
+    await nameSubTopic(db, topicId, topicName);
+    await tg(cfg.token, "sendMessage", { chat_id: cfg.chatId, message_thread_id: topicId, text: `${topicName} follows its own blygs. ${USAGE}` });
+    return reply(cfg, m, `created ${topicName}; /subscribe there to fill it`);
+  }
+
+  if (name === "sub") {
+    const topicName = args.join(" ");
+    if (!topicName) return reply(cfg, m, "usage: /sub <name> — makes this topic a Sub grouping, or renames it");
+    const existing = await getSubTopic(db, sub.topicId);
+    await nameSubTopic(db, sub.topicId, topicName);
+    if (existing) return reply(cfg, m, `renamed ${existing.name} to ${topicName}`);
+    return reply(cfg, m, `this topic is now ${topicName}, a Sub grouping. ${USAGE}`);
   }
 
   if (name === "subscribe") {
@@ -170,7 +223,7 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
     const found = await resolve(arg);
     if (found.type === "failed") return reply(cfg, m, `no blyg found at ${arg}. tried:\n${found.tried.join("\n") || "(invalid url)"}`);
     if (found.type === "legacy") return reply(cfg, m, `${arg} only has a plain RSS feed (${found.feedUrl}); legacy feeds aren't supported yet`);
-    if (await getSubscription(db, sub.topicId, found.origin)) return reply(cfg, m, `already subscribed to ${found.origin}`);
+    if (await getSubscription(db, sub.topicId, found.origin)) return reply(cfg, m, `already subscribed to ${found.origin} here`);
     try {
       const { title, count } = await addSubscription(db, sub, found.origin, found.manifest);
       const notes = found.warnings.map((w) => `\nnote: ${w}`).join("");
@@ -185,9 +238,9 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
     const subs = await listSubscriptions(db, sub.topicId);
     const target = subs.find((s) => sameBlyg(s.origin, arg));
     const origin = target?.origin ?? (await resolveOrigin(arg));
-    if (!origin || !(await getSubscription(db, sub.topicId, origin))) return reply(cfg, m, `not subscribed to ${arg}`);
+    if (!origin || !(await getSubscription(db, sub.topicId, origin))) return reply(cfg, m, `not subscribed to ${arg} here`);
     await removeSubscription(db, sub.topicId, origin);
-    return reply(cfg, m, `unsubscribed from ${origin}`);
+    return reply(cfg, m, `unsubscribed from ${origin} here`);
   }
 
   return reply(cfg, m, USAGE);

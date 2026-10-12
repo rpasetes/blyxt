@@ -55,6 +55,35 @@ export const getSubscription = (db: D1Database, topicId: number, origin: string)
   db.prepare("SELECT s.* FROM subscriptions s JOIN follows f ON f.origin = s.origin WHERE f.topic_id = ? AND s.origin = ?")
     .bind(topicId, origin).first<Subscription>();
 
+export type SubTopic = { topic_id: number; name: string; created: string };
+
+export const getSubTopic = (db: D1Database, topicId: number) =>
+  db.prepare("SELECT * FROM sub_topics WHERE topic_id = ?").bind(topicId).first<SubTopic>();
+
+// register a topic as a Sub grouping, or rename one
+export const nameSubTopic = (db: D1Database, topicId: number, name: string) =>
+  db.prepare("INSERT INTO sub_topics (topic_id, name, created) VALUES (?, ?, ?) ON CONFLICT (topic_id) DO UPDATE SET name = excluded.name")
+    .bind(topicId, name, now()).run();
+
+// every grouping with the blygs it follows, for the overview in the home Sub topic
+export async function listAllSubscriptions(db: D1Database) {
+  const { results } = await db.prepare(
+    `SELECT t.topic_id, t.name, s.* FROM sub_topics t LEFT JOIN follows f ON f.topic_id = t.topic_id LEFT JOIN subscriptions s ON s.origin = f.origin
+     ORDER BY t.created, t.topic_id, f.created`,
+  ).all<SubTopic & Partial<Subscription>>();
+  return results;
+}
+
+// forget a grouping (its topic was deleted); blygs no other topic follows stop being polled
+export async function removeSubTopic(db: D1Database, topicId: number) {
+  await db.batch([
+    db.prepare("DELETE FROM imported WHERE topic_id = ?").bind(topicId),
+    db.prepare("DELETE FROM follows WHERE topic_id = ?").bind(topicId),
+    db.prepare("DELETE FROM sub_topics WHERE topic_id = ?").bind(topicId),
+    db.prepare("DELETE FROM subscriptions WHERE NOT EXISTS (SELECT 1 FROM follows f WHERE f.origin = subscriptions.origin)"),
+  ]);
+}
+
 // unfollow in one topic; a blyg no topic follows anymore stops being polled
 export async function removeSubscription(db: D1Database, topicId: number, origin: string) {
   await db.batch([
@@ -137,6 +166,8 @@ export function messageText(title: string, origin: string, doc: ItemDoc) {
 
 // Telegram said "later" (rate limit, outage): the item stays unapplied and the next poll retries it
 class Retry extends Error {}
+// the topic was deleted in Telegram: its grouping goes too
+class TopicGone extends Error {}
 
 const plain = (html: string) =>
   html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
@@ -148,6 +179,7 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
     result = await tg(sub.token, method, { ...body, text: plain(String(body.text)), link_preview_options: { is_disabled: true } });
   }
   if (!result.ok && (result.error_code === 429 || (result.error_code ?? 500) >= 500)) throw new Retry(result.description);
+  if (!result.ok && result.description?.includes("message thread not found")) throw new TopicGone(result.description);
   return result;
 }
 
@@ -202,7 +234,7 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
     budget.left--;
     const doc = await fetchItem(s.origin, entry.id);
     if (!doc) { complete = false; continue; }
-    for (const topicId of topics) {
+    for (const topicId of [...topics]) {
       const row = seen.get(topicId)!.get(entry.id);
       // the document is ground truth; never adopt a version below the watermark (§13.3)
       if (doc.version <= (row?.version ?? 0)) {
@@ -212,6 +244,11 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
       try {
         await present(db, { ...bot, topicId }, s, doc, row);
       } catch (e) {
+        if (e instanceof TopicGone) {
+          await removeSubTopic(db, topicId);
+          topics.splice(topics.indexOf(topicId), 1);
+          continue;
+        }
         if (!(e instanceof Retry)) throw e;
         complete = false;
         break items;

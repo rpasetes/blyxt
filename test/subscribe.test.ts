@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { addSubscription, listSubscriptions, pollDue, removeSubscription } from "../src/subscribe";
+import { addSubscription, getSubTopic, listSubscriptions, pollDue, removeSubscription } from "../src/subscribe";
+import { handleUpdate, type TgMessage } from "../src/telegram";
 import { d1 } from "./d1";
 
 const ORIGIN = "https://b.example/blyg/";
@@ -13,14 +14,23 @@ function world(items: Record<string, { version: number; created: string }>) {
   const fetched: string[] = [];
   const telegram: { method: string; body: Record<string, unknown> }[] = [];
   let nextMessage = 100;
+  const goneTopics = new Set<number>();
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     if (url.startsWith("https://api.telegram.org/")) {
       const body = JSON.parse(String(init?.body));
-      telegram.push({ method: url.split("/").pop()!, body });
+      const method = url.split("/").pop()!;
+      telegram.push({ method, body });
+      if (goneTopics.has(body.message_thread_id)) return Response.json({ ok: false, error_code: 400, description: "Bad Request: message thread not found" });
+      if (method === "createForumTopic") return Response.json({ ok: true, result: { message_thread_id: 50, name: body.name } });
       return Response.json({ ok: true, result: { message_id: nextMessage++ } });
     }
     fetched.push(url);
+    if (url === ORIGIN + "blyg.json") {
+      const res = Response.json(MANIFEST);
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    }
     if (url === ORIGIN + "items/index.json") {
       return Response.json({ items: Object.entries(items).map(([id, i]) => ({ id, kind: "fragment", ...i })) });
     }
@@ -28,7 +38,7 @@ function world(items: Record<string, { version: number; created: string }>) {
     if (id && items[id]) return Response.json({ id, kind: "fragment", version: items[id].version, content_html: `<p>${id} v${items[id].version}</p>` });
     return new Response("nope", { status: 404 });
   }) as typeof fetch;
-  return { items, fetched, telegram };
+  return { items, fetched, telegram, goneTopics };
 }
 
 const realFetch = globalThis.fetch;
@@ -107,4 +117,69 @@ test("unfollowing in one topic keeps the blyg polled for the other", async () =>
 
   await removeSubscription(db, 7, ORIGIN);
   expect(db.sqlite.query("SELECT COUNT(*) AS n FROM subscriptions").get()).toEqual({ n: 0 });
+});
+
+test("a deleted topic drops its grouping and the others keep going", async () => {
+  const db = d1();
+  const w = world({ [A]: { version: 1, created: "2026-10-01T00:00:00Z" } });
+  await addSubscription(db, { ...BOT, topicId: 3 }, ORIGIN, MANIFEST);
+  await addSubscription(db, { ...BOT, topicId: 7 }, ORIGIN, MANIFEST, "Friends");
+  w.goneTopics.add(3);
+  w.items[B] = { version: 1, created: "2026-10-02T00:00:00Z" };
+  w.telegram.length = 0;
+  due(db);
+  await pollDue(db, BOT);
+
+  expect(await getSubTopic(db, 3)).toBeNull();
+  expect(await listSubscriptions(db, 7)).toHaveLength(1);
+  expect(w.telegram.filter((t) => t.method === "sendMessage").map((t) => t.body.message_thread_id)).toEqual([3, 7]);
+  // the item was applied for the topic that still exists, so the next poll is quiet
+  w.telegram.length = 0;
+  due(db);
+  await pollDue(db, BOT);
+  expect(w.telegram).toEqual([]);
+});
+
+// the webhook side: who may run Sub commands where
+const SITE = { origin: "https://me.example/blyg/", title: "me", subtitle: "", author: { name: "me", url: "https://me.example/" } };
+const CFG = { token: "t", chatId: -100, pubTopicId: 2, subTopicId: 3, ownerId: 1 };
+let nextUpdate = 1;
+const say = async (db: ReturnType<typeof d1>, topic: number, text: string, extra: Partial<TgMessage> = {}) => {
+  const message = { message_id: nextUpdate, message_thread_id: topic, is_topic_message: true, from: { id: 1 }, chat: { id: -100 }, text, ...extra };
+  const after = await handleUpdate({ update_id: nextUpdate++, message }, db, SITE, CFG);
+  await after?.();
+  return !!after;
+};
+const replies = (w: ReturnType<typeof world>) => w.telegram.filter((t) => t.body.reply_parameters).map((t) => t.body.text as string);
+
+test("/sub adopts a topic, then subscriptions there are its own", async () => {
+  const db = d1();
+  const w = world({ [A]: { version: 1, created: "2026-10-01T00:00:00Z" } });
+  // an unregistered topic ignores everything but /sub
+  expect(await say(db, 9, "/subscribe b.example/blyg")).toBe(false);
+  expect(await say(db, 9, "/sub Friends", { is_topic_message: false })).toBe(false);
+  await say(db, 9, "/sub Friends");
+  expect(await getSubTopic(db, 9)).toMatchObject({ name: "Friends" });
+
+  await say(db, 9, `/subscribe ${ORIGIN}`);
+  expect(await listSubscriptions(db, 9)).toHaveLength(1);
+  expect(await listSubscriptions(db, 3)).toEqual([]);
+
+  w.telegram.length = 0;
+  await say(db, 9, "/sub Close friends");
+  await say(db, 3, "/subscriptions");
+  expect(replies(w)).toEqual(["renamed Friends to Close friends", `Close friends\n• B — ${ORIGIN}`]);
+});
+
+test("/newsub creates and registers a topic; Pub and strangers can't run Sub commands", async () => {
+  const db = d1();
+  const w = world({});
+  await say(db, 3, "/newsub Reading list");
+  expect(w.telegram[0]).toMatchObject({ method: "createForumTopic", body: { name: "Reading list" } });
+  expect(await getSubTopic(db, 50)).toMatchObject({ name: "Reading list" });
+  expect(w.telegram.some((t) => t.method === "sendMessage" && t.body.message_thread_id === 50)).toBe(true);
+
+  expect(await say(db, 2, "/sub Nope")).toBe(true); // Pub handles its own commands
+  expect(await getSubTopic(db, 2)).toBeNull();
+  expect(await say(db, 50, "/subscriptions", { from: { id: 666 } })).toBe(false);
 });
