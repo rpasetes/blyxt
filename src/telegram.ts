@@ -202,8 +202,8 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
   const home = sub.topicId === cfg.subTopicId;
 
   if (name === "subscriptions") {
-    const line = (s: { title?: string; origin?: string; last_error?: string | null }) =>
-      `• ${s.title} — ${s.origin}${s.last_error ? ` (failing: ${s.last_error})` : ""}`;
+    const line = (s: { title?: string; origin?: string; last_error?: string | null; lossy?: number }) =>
+      `• ${s.title} — ${s.origin}${s.lossy ? " (feed only: no archive index)" : ""}${s.last_error ? ` (failing: ${s.last_error})` : ""}`;
     if (!home) {
       const subs = await listSubscriptions(db, sub.topicId);
       return reply(cfg, m, subs.length ? subs.map(line).join("\n") : `no subscriptions here yet. ${USAGE}`);
@@ -245,8 +245,9 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
     if (found.type === "legacy") return reply(cfg, m, `${arg} only has a plain RSS feed (${found.feedUrl}); legacy feeds aren't supported yet`);
     if (await getSubscription(db, sub.topicId, found.origin)) return reply(cfg, m, `already subscribed to ${found.origin} here`);
     try {
-      const { title, count } = await addSubscription(db, sub, found.origin, found.manifest);
-      const notes = found.warnings.map((w) => `\nnote: ${w}`).join("");
+      const { title, count, lossy } = await addSubscription(db, sub, found.origin, found.manifest);
+      const warnings = [...found.warnings, ...(lossy ? ["it has no archive index, so blyxt follows its feed instead; posts that scroll out of the feed between polls can be missed"] : [])];
+      const notes = warnings.map((w) => `\nnote: ${w}`).join("");
       return reply(cfg, m, `subscribed to ${title} — ${found.origin}\n${count} item${count === 1 ? "" : "s"} so far; new posts and edits show up here within ${POLL_MINUTES} minutes${notes}`);
     } catch (e) {
       return reply(cfg, m, `found a blyg at ${found.origin} but couldn't read its archive: ${(e as Error).message}`);

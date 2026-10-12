@@ -123,3 +123,30 @@ test("a content_hash that doesn't match content_md is surfaced, and the content 
   expect(notices(w)).toEqual(["⚠ R's v2 of this post doesn't match its own content_hash. it's shown anyway; the blyg's software has a bug."]);
   expect(db.sqlite.query("SELECT version FROM imported").get()).toEqual({ version: 2 });
 });
+
+test("a missing index falls back to the feed, says so once, and recovers", async () => {
+  const db = d1();
+  const B = "0b000000000000000000000000";
+  const w = world(null, { [A]: { version: 1 } });
+  const { lossy } = await addSubscription(db, SUB, ORIGIN, MANIFEST);
+  expect(lossy).toBe(true);
+  expect(db.sqlite.query("SELECT lossy, feed_url FROM subscriptions").get()).toEqual({ lossy: 1, feed_url: ORIGIN + "feed.xml" });
+
+  w.docs[A] = { version: 2 };
+  w.docs[B] = { version: 1 };
+  due(db);
+  await pollDue(db, BOT);
+  expect(db.sqlite.query("SELECT item_id, version FROM imported ORDER BY item_id").all()).toEqual([{ item_id: A, version: 2 }, { item_id: B, version: 1 }]);
+  expect(notices(w)).toEqual([]); // it was lossy from the start; /subscribe said so
+
+  w.index = { [A]: 2, [B]: 1 };
+  due(db);
+  await pollDue(db, BOT);
+  expect(w.sent.at(-1)?.body.text).toBe("R's archive index is back; nothing will be missed from here on.");
+  expect(db.sqlite.query("SELECT lossy, failures FROM subscriptions").get()).toEqual({ lossy: 0, failures: 0 });
+
+  w.index = null;
+  due(db);
+  await pollDue(db, BOT);
+  expect(notices(w)).toEqual(["⚠ R has no archive index right now, so blyxt is following its feed instead. posts that scroll out of the feed between polls can be missed."]);
+});

@@ -14,6 +14,9 @@ export type Subscription = {
   next_poll: string;
   failures: number;
   last_error: string | null;
+  feed_url: string | null;
+  // 1 while following the feed because the archive index is missing
+  lossy: number;
 };
 
 type Imported = {
@@ -48,9 +51,9 @@ const FRESH_MINUTES = 60;
 const fresh = (at: string | null | undefined) => !!at && Date.parse(at) > Date.now() - FRESH_MINUTES * 60_000;
 const minutesFromNow = (m: number) => new Date(Date.now() + m * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
-const get = (url: string, etag?: string | null) =>
+const get = (url: string, etag?: string | null, accept = "application/json") =>
   fetch(url, {
-    headers: { "user-agent": USER_AGENT, accept: "application/json", ...(etag ? { "if-none-match": etag } : {}) },
+    headers: { "user-agent": USER_AGENT, accept, ...(etag ? { "if-none-match": etag } : {}) },
     signal: AbortSignal.timeout(10_000),
   });
 
@@ -103,6 +106,7 @@ export async function removeSubscription(db: D1Database, topicId: number, origin
 
 type IndexResult =
   | { status: "unchanged" }
+  | { status: "missing" }
   | { status: "ok"; items: IndexEntry[]; etag: string | null }
   | { status: "error"; error: string; retryAfter: string | null };
 
@@ -110,6 +114,8 @@ async function fetchIndex(url: string, etag?: string | null): Promise<IndexResul
   const res = await get(url, etag);
   const fail = (error: string): IndexResult => ({ status: "error", error, retryAfter: res.headers.get("retry-after") });
   if (res.status === 304) return { status: "unchanged" };
+  // an otherwise-live blyg without an index is nonconforming; the feed stands in (§13.2)
+  if (res.status === 404 || res.status === 410) return { status: "missing" };
   if (!res.ok) return fail(`${res.status} from ${url}`);
   try {
     const data = (await res.json()) as { items?: unknown };
@@ -121,6 +127,22 @@ async function fetchIndex(url: string, etag?: string | null): Promise<IndexResul
   } catch {
     return fail(`unparseable ${url}`);
   }
+}
+
+// the feed window as index entries: the highest version per blyg:id (§7)
+async function fetchFeed(url: string, etag?: string | null): Promise<IndexResult> {
+  const res = await get(url, etag, "application/rss+xml, application/xml;q=0.9, */*;q=0.1");
+  if (res.status === 304) return { status: "unchanged" };
+  if (!res.ok) return { status: "error", error: `no archive index, and ${res.status} from ${url}`, retryAfter: res.headers.get("retry-after") };
+  const latest = new Map<string, IndexEntry>();
+  for (const [, body] of (await res.text()).matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)) {
+    const tag = (name: string) => body.match(new RegExp(`<blyg:${name}>\\s*([^<]*?)\\s*</blyg:${name}>`))?.[1];
+    const [id, version, kind] = [tag("id"), Number(tag("version")), tag("kind")];
+    // an unparseable entry is skipped, never the feed (§13.2)
+    if (!id || !ID_RE.test(id) || !Number.isInteger(version) || !kind || !KINDS.has(kind)) continue;
+    if ((latest.get(id)?.version ?? 0) < version) latest.set(id, { id, kind, version, created: tag("created") });
+  }
+  return { status: "ok", items: [...latest.values()], etag: res.headers.get("etag") };
 }
 
 async function fetchItem(origin: string, id: string): Promise<ItemDoc | null> {
@@ -139,14 +161,17 @@ async function fetchItem(origin: string, id: string): Promise<ItemDoc | null> {
 export async function addSubscription(db: D1Database, sub: Sub, origin: string, manifest: Manifest, topicName = "Sub") {
   const title = (typeof manifest.title === "string" && manifest.title.trim()) || new URL(origin).host;
   const indexUrl = new URL(typeof manifest.items === "string" ? manifest.items : "items/index.json", origin).href;
-  const index = await fetchIndex(indexUrl);
+  const feedUrl = new URL(typeof manifest.feed === "string" ? manifest.feed : "feed.xml", origin).href;
+  let index = await fetchIndex(indexUrl);
+  const lossy = index.status === "missing";
+  if (lossy) index = await fetchFeed(feedUrl);
   if (index.status !== "ok") throw new Error(index.status === "error" ? index.error : "archive index unavailable");
 
   const at = now();
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO sub_topics (topic_id, name, created) VALUES (?, ?, ?)").bind(sub.topicId, topicName, at),
-    db.prepare("INSERT OR IGNORE INTO subscriptions (origin, title, index_url, index_etag, created, last_polled, next_poll) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(origin, title, indexUrl, index.etag, at, at, minutesFromNow(POLL_MINUTES)),
+    db.prepare("INSERT OR IGNORE INTO subscriptions (origin, title, index_url, feed_url, lossy, index_etag, created, last_polled, next_poll) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(origin, title, indexUrl, feedUrl, lossy ? 1 : 0, index.etag, at, at, minutesFromNow(POLL_MINUTES)),
     db.prepare("INSERT INTO follows (topic_id, origin, created) VALUES (?, ?, ?)").bind(sub.topicId, origin, at),
     ...index.items.map((i) =>
       db.prepare("INSERT OR IGNORE INTO imported (topic_id, origin, item_id, version, kind) VALUES (?, ?, ?, ?, ?)").bind(sub.topicId, origin, i.id, i.version, i.kind),
@@ -159,7 +184,7 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
     // the preview is a courtesy; if Telegram is busy the next new item shows up anyway
     if (doc) await present(db, sub, { origin, title }, doc, { topic_id: sub.topicId, item_id: doc.id, version: 0, kind: doc.kind, content_hash: null, tg_message_id: null }).catch(() => {});
   }
-  return { title, count: index.items.length };
+  return { title, count: index.items.length, lossy };
 }
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -287,6 +312,14 @@ async function applyDoc(db: D1Database, bot: Bot, s: Subscription, doc: ItemDoc,
   }
 }
 
+// a notice to every topic following a blyg
+async function announce(bot: Bot, topics: number[], text: string) {
+  for (const topicId of topics) {
+    await send({ ...bot, topicId }, "sendMessage", { chat_id: bot.chatId, message_thread_id: topicId, text: esc(text) })
+      .catch((e) => { if (!(e instanceof TopicGone)) throw e; });
+  }
+}
+
 // record a protocol violation and tell every following topic, once; the notice replies under the post where it can
 async function discrepancy(db: D1Database, bot: Bot, s: Subscription, topics: number[], seen: Seen, doc: ItemDoc, kind: string, detail: string, text: string) {
   const known = await db.prepare("SELECT 1 FROM discrepancies WHERE origin = ? AND item_id = ? AND kind = ? AND version = ? AND detail = ?")
@@ -338,8 +371,22 @@ async function sweep(db: D1Database, bot: Bot, budget: { left: number }) {
 // Every changed item is fetched once, however many topics show it.
 async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left: number }) {
   budget.left--;
-  const index = await fetchIndex(s.index_url, s.index_etag);
+  // while lossy, the stored ETag is the feed's
+  let index = await fetchIndex(s.index_url, s.lossy ? null : s.index_etag);
+  const lossy = index.status === "missing";
+  if (lossy) {
+    budget.left--;
+    index = await fetchFeed(s.feed_url ?? new URL("feed.xml", s.origin).href, s.lossy ? s.index_etag : null);
+  }
+  if (index.status !== "error" && index.status !== "missing" && lossy !== !!s.lossy) {
+    // announced before it's recorded, so a busy Telegram means announcing again next poll, not never
+    await announce(bot, (await followers(db, s.origin)).topics, lossy
+      ? `⚠ ${s.title} has no archive index right now, so blyxt is following its feed instead. posts that scroll out of the feed between polls can be missed.`
+      : `${s.title}'s archive index is back; nothing will be missed from here on.`);
+    await db.prepare("UPDATE subscriptions SET lossy = ? WHERE origin = ?").bind(lossy ? 1 : 0, s.origin).run();
+  }
   if (index.status === "unchanged") return { ok: true as const };
+  if (index.status === "missing") return { ok: false as const, error: "archive index missing", retryAfter: null };
   if (index.status === "error") return { ok: false as const, error: index.error, retryAfter: index.retryAfter };
 
   const { topics, seen } = await followers(db, s.origin);
