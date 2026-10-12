@@ -13,6 +13,8 @@ export type TgMessage = {
   chat: { id: number };
   text?: string;
   reply_to_message?: TgMessage;
+  // the part of the replied-to message the user selected, if any
+  quote?: { text: string };
   pinned_message?: TgMessage;
 };
 export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage };
@@ -61,11 +63,22 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   // Telegram retries webhooks; a message publishes at most once
   if (await itemForMessage(db, m.chat.id, m.message_id)) return null;
 
-  const md = m.text.trim();
+  const prefix = await quotePrefix(db, m);
+  const md = (prefix ?? "") + m.text.trim();
   const composed = await compose(db, site.origin, md);
   if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. fix it and send it again`);
-  const item = await publishNew(db, "fragment", md, composed.html, { chatId: m.chat.id, messageId: m.message_id });
-  return () => reply(cfg, m, `published v1 → ${site.origin}${pagePath(item)}`);
+  const kind = composed.thread ? "thread" : "fragment";
+  const item = await publishNew(db, kind, { md, html: composed.html, transclusions: composed.transclusions }, { chatId: m.chat.id, messageId: m.message_id, prefix });
+  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1 → ${site.origin}${pagePath(item)}`);
+}
+
+// replying in Pub to one of your posts quotes it: the reply becomes a thread that opens with ![[id]],
+// or with the part you selected as a partial quote (§10.1)
+async function quotePrefix(db: D1Database, m: TgMessage) {
+  const to = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
+  if (!to) return undefined;
+  const quote = m.quote?.text.trim();
+  return `![[${to.item_id}]]\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n`;
 }
 
 // editing a published message publishes its next version
@@ -75,10 +88,15 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (!link) return null;
 
   // unchanged text (including Telegram retries) is not a new version
-  const md = m.text.trim();
-  const composed = await compose(db, site.origin, md);
+  const md = (link.prefix ?? "") + m.text.trim();
+  const composed = await compose(db, site.origin, md, link.item_id);
   if (!composed.ok) return () => reply(cfg, m, `edit not published: ${composed.error}. the post keeps its current version`);
-  const item = await publishEdit(db, link.item_id, md, composed.html);
+  // the kind is fixed when a post is first published: it decides the page's address
+  const current = await getItem(db, link.item_id);
+  if (composed.thread && current?.authored_kind === "fragment") {
+    return () => reply(cfg, m, "edit not published: a fragment can't quote. send it as a new message (or reply to the post you're quoting)");
+  }
+  const item = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions });
   if (!item) {
     if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
     return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
@@ -122,11 +140,13 @@ async function handleRepublish(m: TgMessage, id: string, note: string | null, db
   if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
   if (item.kind !== "withdrawn") return () => reply(cfg, m, `this post isn't withdrawn (it's at v${item.version})`);
   const repliedTo = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
-  const md = (repliedTo?.item_id === id && m.reply_to_message?.text?.trim()) || (await lastContent(db, id))?.content_md;
+  const text = repliedTo?.item_id === id && m.reply_to_message?.text?.trim();
+  const md = text ? (repliedTo.prefix ?? "") + text : (await lastContent(db, id))?.content_md;
   if (!md) return () => reply(cfg, m, "nothing to republish: this post never had content");
-  const composed = await compose(db, site.origin, md);
+  const composed = await compose(db, site.origin, md, id);
   if (!composed.ok) return () => reply(cfg, m, `not republished: ${composed.error}. edit the post, then /republish again`);
-  const next = await republish(db, id, md, composed.html, note);
+  if (composed.thread && item.authored_kind === "fragment") return () => reply(cfg, m, "not republished: a fragment can't quote. edit out the ![[id]] line, then /republish again");
+  const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions }, note);
   if (!next) return null;
   return () => reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);
 }

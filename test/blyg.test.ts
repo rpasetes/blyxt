@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { contentHash, directiveLines, excerpt, feed, ID_RE, itemDocument, itemPage, linkIds, newId, pagePath, pinnedDocument, render, type Item, type Site } from "../src/blyg";
+import { contentHash, directives, textContent, excerpt, feed, ID_RE, itemDocument, itemPage, linkIds, newId, pagePath, pinnedDocument, render, type Item, type Site } from "../src/blyg";
 
 const site: Site = { origin: "https://example.com/blyg/", title: "t", subtitle: "s", author: { name: "a", url: "https://example.com/" } };
 const item: Item = {
@@ -62,11 +62,31 @@ test("[[id]] links resolve to absolute anchors; code and directive forms stay in
 });
 
 test("directive lines are found outside code only", () => {
-  expect(directiveLines(`intro\n![[${A}]]\n\n\`\`\`\n![[${B}]]\n\`\`\`\n\n  ![[${B}@v2]]  `)).toEqual([
-    { id: A, versioned: false },
-    { id: B, versioned: true },
+  expect(directives(`intro\n![[${A}]]\n\n\`\`\`\n![[${B}]]\n\`\`\`\n\n  ![[${B}@v2]]  `)).toEqual([
+    { id: A, versioned: false, selection: undefined },
+    { id: B, versioned: true, selection: undefined },
   ]);
-  expect(directiveLines(`text ![[${A}]] text`)).toEqual([]);
+  expect(directives(`text ![[${A}]] text`)).toEqual([]);
+  expect(directives(`> ![[${A}]]\n\n- ![[${B}]]`)).toEqual([]);
+});
+
+test("an attached blockquote is a selection; a blank line detaches it", () => {
+  expect(directives(`![[${A}]]\n> quoted *bit*\n> line two\n\nmine`)).toEqual([{ id: A, versioned: false, selection: "quoted bit\nline two" }]);
+  expect(directives(`![[${A}]]\n\n> my own quote`)).toEqual([{ id: A, versioned: false, selection: undefined }]);
+});
+
+test("directives bake snapshots; nested and inert ones stay text", () => {
+  const quotes = new Map([[A, { version: 3, html: "<p>source <em>text</em></p>\n" }]]);
+  const whole = render(`![[${A}]]\nafter`, "https://example.com/", undefined, quotes);
+  expect(whole).toContain(`<blockquote class="blyg-transclusion" data-blyg-id="${A}" data-blyg-version="3"><p>source <em>text</em></p>\n</blockquote>`);
+  expect(whole).toContain("<p>after</p>");
+  const partial = render(`![[${A}]]\n> source *text*`, "https://example.com/", undefined, quotes);
+  expect(partial).toContain(`<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="${A}" data-blyg-version="3">\n<p>source text</p>\n</blockquote>`);
+  expect(render(`> ![[${A}]]`, "https://example.com/", undefined, quotes)).not.toContain("blyg-transclusion");
+});
+
+test("text content keeps block boundaries as line breaks", () => {
+  expect(textContent("<p>one  <b>two</b>\nthree</p><ul><li>a &amp; b</li></ul>")).toBe("one two three\na & b");
 });
 
 test("relative URLs in content_html become absolute", () => {
