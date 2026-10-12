@@ -10,9 +10,13 @@
     "discover": "bun --env-file=.dev.vars scripts/discover.ts",
     "set-webhook": "bun --env-file=.dev.vars scripts/set-webhook.ts",
     "typecheck": "tsc",
-    "test": "bun test"
+    "test": "bun test",
+    "refresh-sub": "bun --env-file=.dev.vars scripts/refresh-sub.ts"
   },
-  "trustedDependencies": ["esbuild", "workerd"],
+  "trustedDependencies": [
+    "esbuild",
+    "workerd"
+  ],
   "dependencies": {
     "marked": "^18.0.14"
   },

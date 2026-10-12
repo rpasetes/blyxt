@@ -1,6 +1,7 @@
 // Read side of the Sub topic: subscriptions and polling (spec §12.3, §13).
 import { ID_RE, now } from "./blyg";
 import { USER_AGENT, type Manifest } from "./resolve";
+import { toTelegramHtml } from "./tghtml";
 import { tg } from "./telegram";
 
 export type Subscription = {
@@ -17,7 +18,7 @@ export type Subscription = {
 
 type Imported = { item_id: string; version: number; kind: string; content_hash: string | null; tg_message_id: number | null };
 type IndexEntry = { id: string; kind: string; created?: string; version: number };
-type ItemDoc = { id: string; kind: string; version: number; content_md?: string; content_hash?: string; page?: string };
+type ItemDoc = { id: string; kind: string; version: number; content_html?: string; content_hash?: string; page?: string };
 
 export type Sub = { token: string; chatId: number; topicId: number };
 
@@ -100,17 +101,36 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
   const newest = index.items.find((i) => i.kind !== "withdrawn");
   if (newest) {
     const doc = await fetchItem(origin, newest.id);
-    if (doc) await present(db, sub, { origin, title }, doc, { item_id: doc.id, version: 0, kind: doc.kind, content_hash: null, tg_message_id: null });
+    // the preview is a courtesy; if Telegram is busy the next new item shows up anyway
+    if (doc) await present(db, sub, { origin, title }, doc, { item_id: doc.id, version: 0, kind: doc.kind, content_hash: null, tg_message_id: null }).catch(() => {});
   }
   return { title, count: index.items.length };
 }
 
-function messageText(title: string, origin: string, doc: ItemDoc) {
-  if (doc.kind === "withdrawn") return `${title} · withdrawn`;
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+// Sub messages show the rendered item (content_html), so baked quotes read as quotes, not ![[id]] directives
+export function messageText(title: string, origin: string, doc: ItemDoc) {
+  if (doc.kind === "withdrawn") return `<b>${esc(title)}</b> · withdrawn`;
   const link = new URL(doc.page ?? `${doc.kind === "thread" ? "t" : "f"}/${doc.id}/`, origin).href;
-  let body = (doc.content_md ?? "").trim();
-  if (body.length > MAX_MESSAGE) body = body.slice(0, MAX_MESSAGE).trimEnd() + "…";
-  return `${title}${doc.version > 1 ? ` · v${doc.version}` : ""}\n\n${body}\n\n${link}`;
+  const body = toTelegramHtml(doc.content_html ?? "", origin, MAX_MESSAGE);
+  return `<b>${esc(title)}</b>${doc.version > 1 ? ` · v${doc.version}` : ""}\n\n${body}\n\n<a href="${esc(link)}">${esc(link)}</a>`;
+}
+
+// Telegram said "later" (rate limit, outage): the item stays unapplied and the next poll retries it
+class Retry extends Error {}
+
+const plain = (html: string) =>
+  html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+
+async function send(sub: Sub, method: string, body: Record<string, unknown>) {
+  let result = await tg(sub.token, method, { ...body, parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+  // markup Telegram rejects still gets through as plain text
+  if (!result.ok && result.error_code === 400 && result.description?.includes("parse entities")) {
+    result = await tg(sub.token, method, { ...body, text: plain(String(body.text)), link_preview_options: { is_disabled: true } });
+  }
+  if (!result.ok && (result.error_code === 429 || (result.error_code ?? 500) >= 500)) throw new Retry(result.description);
+  return result;
 }
 
 // Show a document in the Sub topic: a new message for a new item, an edit for a later version.
@@ -119,12 +139,13 @@ async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" 
   let messageId = row?.tg_message_id ?? null;
 
   if (messageId) {
-    const edited = await tg(sub.token, "editMessageText", { chat_id: sub.chatId, message_id: messageId, text, link_preview_options: { is_disabled: true } });
-    if (!edited.ok) messageId = null;
+    const edited = await send(sub, "editMessageText", { chat_id: sub.chatId, message_id: messageId, text });
+    // "not modified" means the message already shows this; anything else (deleted, too old) gets a fresh post
+    if (!edited.ok && !edited.description?.includes("message is not modified")) messageId = null;
   }
   // withdrawn content is never posted fresh (§13.4); there is nothing to show
   if (!messageId && doc.kind !== "withdrawn") {
-    const sent = await tg(sub.token, "sendMessage", { chat_id: sub.chatId, message_thread_id: sub.topicId, text, link_preview_options: { is_disabled: true } });
+    const sent = await send(sub, "sendMessage", { chat_id: sub.chatId, message_thread_id: sub.topicId, text });
     messageId = sent.ok ? (sent.result as { message_id: number }).message_id : null;
   }
 
@@ -155,7 +176,13 @@ async function pollOne(db: D1Database, sub: Sub, s: Subscription, budget: { left
     const row = seen.get(entry.id);
     // the document is ground truth; never adopt a version below the watermark (§13.3)
     if (!doc || doc.version <= (row?.version ?? 0)) { complete = false; continue; }
-    await present(db, sub, s, doc, row);
+    try {
+      await present(db, sub, s, doc, row);
+    } catch (e) {
+      if (!(e instanceof Retry)) throw e;
+      complete = false;
+      break;
+    }
   }
   // only remember the index's ETag once everything it listed has been applied
   await db.prepare("UPDATE subscriptions SET index_etag = ? WHERE origin = ?").bind(complete ? index.etag : null, s.origin).run();
