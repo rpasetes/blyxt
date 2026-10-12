@@ -3,7 +3,7 @@
 import { ID_RE, pagePath, type Site } from "./blyg";
 import { compose } from "./compose";
 import { resolve } from "./resolve";
-import { getItem, itemForMessage, pin, publishEdit, publishNew, withdraw } from "./store";
+import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, withdraw } from "./store";
 import { addSubscription, getSubscription, listSubscriptions, POLL_MINUTES, removeSubscription } from "./subscribe";
 
 export type TgMessage = {
@@ -81,12 +81,12 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   const item = await publishEdit(db, link.item_id, md, composed.html);
   if (!item) {
     if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
-    return () => reply(cfg, m, "edit not published: this post is withdrawn");
+    return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
   }
   return () => reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
 }
 
-const PUB_USAGE = "reply to a published post with /withdraw [note] or /pin [vN] (or put its link first: /withdraw <link> [note])";
+const PUB_USAGE = "reply to a published post with /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note])";
 
 // the post a command names: the message it replies to, else a link or id as the first argument
 // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
@@ -101,10 +101,11 @@ async function target(m: TgMessage, db: D1Database, args: string[]) {
 async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
   const [command, ...args] = m.text!.trim().split(/\s+/);
   const name = command.slice(1).split("@")[0].toLowerCase();
-  if (name !== "withdraw" && name !== "pin") return () => reply(cfg, m, PUB_USAGE);
+  if (!["withdraw", "republish", "pin"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
   const id = await target(m, db, args);
   if (!id) return () => reply(cfg, m, PUB_USAGE);
   if (name === "pin") return handlePin(m, null, id, db, site, cfg, args[0]);
+  if (name === "republish") return handleRepublish(m, id, args.join(" ") || null, db, site, cfg);
 
   const note = args.join(" ") || null;
   const item = await withdraw(db, id, note);
@@ -112,6 +113,22 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
   const existing = await getItem(db, id);
   if (!existing) return () => reply(cfg, m, `no post ${id} on this blyg`);
   return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
+}
+
+// a withdrawn post comes back as its next version: the replied-to message's text as it reads now,
+// else the last content it published
+async function handleRepublish(m: TgMessage, id: string, note: string | null, db: D1Database, site: Site, cfg: Config) {
+  const item = await getItem(db, id);
+  if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
+  if (item.kind !== "withdrawn") return () => reply(cfg, m, `this post isn't withdrawn (it's at v${item.version})`);
+  const repliedTo = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
+  const md = (repliedTo?.item_id === id && m.reply_to_message?.text?.trim()) || (await lastContent(db, id))?.content_md;
+  if (!md) return () => reply(cfg, m, "nothing to republish: this post never had content");
+  const composed = await compose(db, site.origin, md);
+  if (!composed.ok) return () => reply(cfg, m, `not republished: ${composed.error}. edit the post, then /republish again`);
+  const next = await republish(db, id, md, composed.html, note);
+  if (!next) return null;
+  return () => reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);
 }
 
 // pinning in Telegram, or /pin [vN], pins a version forever (§8); Telegram doesn't report unpins, and pins can't be undone anyway
