@@ -24,6 +24,8 @@ type Imported = {
   content_hash: string | null;
   tg_message_id: number | null;
   posted_at?: string | null;
+  reply_message_id?: number | null;
+  replied_at?: string | null;
 };
 type IndexEntry = { id: string; kind: string; created?: string; version: number };
 type ItemDoc = { id: string; kind: string; version: number; content_html?: string; content_hash?: string; page?: string };
@@ -37,7 +39,10 @@ const KINDS = new Set(["fragment", "thread", "withdrawn"]);
 // Workers allow 50 subrequests per invocation on the free plan; leave room for Telegram calls
 const FETCH_BUDGET = 20;
 const MAX_MESSAGE = 3500;
+// a Sub message this recent is still near the bottom of its topic, so an edit to it is seen without a reply
+const FRESH_MINUTES = 60;
 
+const fresh = (at: string | null | undefined) => !!at && Date.parse(at) > Date.now() - FRESH_MINUTES * 60_000;
 const minutesFromNow = (m: number) => new Date(Date.now() + m * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 const get = (url: string, etag?: string | null) =>
@@ -184,15 +189,32 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
 }
 
 // Show a document in the Sub topic: a new message for a new item, an edit for a later version.
+// Edits don't move a message, so a later version of an older post also gets a reply under it,
+// and a burst of versions keeps editing that one reply while it's fresh.
 async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined) {
   const text = messageText(s.title, s.origin, doc);
   let messageId = row?.tg_message_id ?? null;
   let postedAt = row?.posted_at ?? null;
+  let replyId = row?.reply_message_id ?? null;
+  let repliedAt = row?.replied_at ?? null;
 
   if (messageId) {
     const edited = await send(sub, "editMessageText", { chat_id: sub.chatId, message_id: messageId, text });
     // "not modified" means the message already shows this; anything else (deleted, too old) gets a fresh post
-    if (!edited.ok && !edited.description?.includes("message is not modified")) messageId = null;
+    if (!edited.ok && !edited.description?.includes("message is not modified")) messageId = replyId = repliedAt = null;
+    else if (!fresh(postedAt)) {
+      const reedited = replyId && fresh(repliedAt) && (await send(sub, "editMessageText", { chat_id: sub.chatId, message_id: replyId, text }));
+      if (!reedited || (!reedited.ok && !reedited.description?.includes("message is not modified"))) {
+        const replied = await send(sub, "sendMessage", {
+          chat_id: sub.chatId,
+          message_thread_id: sub.topicId,
+          reply_parameters: { message_id: messageId, allow_sending_without_reply: true },
+          text,
+        });
+        replyId = replied.ok ? (replied.result as { message_id: number }).message_id : null;
+        repliedAt = replyId ? now() : null;
+      }
+    }
   }
   // withdrawn content is never posted fresh (§13.4); there is nothing to show
   if (!messageId && doc.kind !== "withdrawn") {
@@ -202,10 +224,11 @@ async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" 
   }
 
   await db.prepare(
-    `INSERT INTO imported (topic_id, origin, item_id, version, kind, content_hash, tg_message_id, posted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO imported (topic_id, origin, item_id, version, kind, content_hash, tg_message_id, posted_at, reply_message_id, replied_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (topic_id, origin, item_id) DO UPDATE SET version = excluded.version, kind = excluded.kind, content_hash = excluded.content_hash,
-       tg_message_id = excluded.tg_message_id, posted_at = excluded.posted_at`,
-  ).bind(sub.topicId, s.origin, doc.id, doc.version, doc.kind, doc.content_hash ?? null, messageId, postedAt).run();
+       tg_message_id = excluded.tg_message_id, posted_at = excluded.posted_at, reply_message_id = excluded.reply_message_id, replied_at = excluded.replied_at`,
+  ).bind(sub.topicId, s.origin, doc.id, doc.version, doc.kind, doc.content_hash ?? null, messageId, postedAt, replyId, repliedAt).run();
 }
 
 // One poll of one blyg: diff its archive index against each following topic's watermarks (§13.2).
@@ -218,7 +241,7 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
 
   const topics = (await db.prepare("SELECT topic_id FROM follows WHERE origin = ? ORDER BY created").bind(s.origin).all<{ topic_id: number }>()).results
     .map((f) => f.topic_id);
-  const { results } = await db.prepare("SELECT topic_id, item_id, version, kind, content_hash, tg_message_id, posted_at FROM imported WHERE origin = ?")
+  const { results } = await db.prepare("SELECT * FROM imported WHERE origin = ?")
     .bind(s.origin).all<Imported>();
   const seen = new Map(topics.map((t) => [t, new Map<string, Imported>()]));
   for (const r of results) seen.get(r.topic_id)?.set(r.item_id, r);

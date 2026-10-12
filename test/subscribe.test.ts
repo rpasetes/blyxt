@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { addSubscription, getSubTopic, listSubscriptions, pollDue, removeSubscription } from "../src/subscribe";
 import { handleUpdate, type TgMessage } from "../src/telegram";
 import { d1 } from "./d1";
@@ -10,11 +10,12 @@ const BOT = { token: "t", chatId: -100 };
 const MANIFEST = { blyg: "0.3", title: "B", items: "items/index.json" };
 
 // a followed blyg plus a Telegram that records every call
-function world(items: Record<string, { version: number; created: string }>) {
+function world(items: Record<string, { version: number; created: string; kind?: string }>) {
   const fetched: string[] = [];
   const telegram: { method: string; body: Record<string, unknown> }[] = [];
   let nextMessage = 100;
   const goneTopics = new Set<number>();
+  const deletedMessages = new Set<number>();
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     if (url.startsWith("https://api.telegram.org/")) {
@@ -22,8 +23,10 @@ function world(items: Record<string, { version: number; created: string }>) {
       const method = url.split("/").pop()!;
       telegram.push({ method, body });
       if (goneTopics.has(body.message_thread_id)) return Response.json({ ok: false, error_code: 400, description: "Bad Request: message thread not found" });
+      if (method === "editMessageText" && deletedMessages.has(body.message_id)) return Response.json({ ok: false, error_code: 400, description: "Bad Request: message to edit not found" });
       if (method === "createForumTopic") return Response.json({ ok: true, result: { message_thread_id: 50, name: body.name } });
-      return Response.json({ ok: true, result: { message_id: nextMessage++ } });
+      // an edit keeps its message id; only a send makes a new one
+      return Response.json({ ok: true, result: { message_id: method === "sendMessage" ? nextMessage++ : body.message_id } });
     }
     fetched.push(url);
     if (url === ORIGIN + "blyg.json") {
@@ -35,10 +38,10 @@ function world(items: Record<string, { version: number; created: string }>) {
       return Response.json({ items: Object.entries(items).map(([id, i]) => ({ id, kind: "fragment", ...i })) });
     }
     const id = url.match(/items\/(\w+)\.json$/)?.[1];
-    if (id && items[id]) return Response.json({ id, kind: "fragment", version: items[id].version, content_html: `<p>${id} v${items[id].version}</p>` });
+    if (id && items[id]) return Response.json({ id, kind: items[id].kind ?? "fragment", version: items[id].version, content_html: `<p>${id} v${items[id].version}</p>` });
     return new Response("nope", { status: 404 });
   }) as typeof fetch;
-  return { items, fetched, telegram, goneTopics };
+  return { items, fetched, telegram, goneTopics, deletedMessages };
 }
 
 const realFetch = globalThis.fetch;
@@ -182,4 +185,60 @@ test("/newsub creates and registers a topic; Pub and strangers can't run Sub com
   expect(await say(db, 2, "/sub Nope")).toBe(true); // Pub handles its own commands
   expect(await getSubTopic(db, 2)).toBeNull();
   expect(await say(db, 50, "/subscriptions", { from: { id: 666 } })).toBe(false);
+});
+
+// Sub-side edits: older posts get a reply when a later version arrives
+describe("later versions of an older Sub post", () => {
+  const age = (db: ReturnType<typeof d1>, column: "posted_at" | "replied_at", minutes: number) =>
+    db.sqlite.exec(`UPDATE imported SET ${column} = '${new Date(Date.now() - minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z")}' WHERE ${column} IS NOT NULL`);
+  const bump = async (db: ReturnType<typeof d1>, w: ReturnType<typeof world>, change: Partial<{ version: number; kind: string }> = {}) => {
+    Object.assign(w.items[A], { version: w.items[A].version + 1, ...change });
+    w.telegram.length = 0;
+    due(db);
+    await pollDue(db, BOT);
+    return w.telegram.map((t) => [t.method, t.body.message_id ?? (t.body.reply_parameters as { message_id: number } | undefined)?.message_id]);
+  };
+  async function setup() {
+    const db = d1();
+    const w = world({ [A]: { version: 1, created: "2026-10-01T00:00:00Z" } });
+    await addSubscription(db, { ...BOT, topicId: 3 }, ORIGIN, MANIFEST); // posts message 100
+    return { db, w };
+  }
+
+  test("within the hour, the original is edited and nothing else", async () => {
+    const { db, w } = await setup();
+    expect(await bump(db, w)).toEqual([["editMessageText", 100]]);
+  });
+
+  test("after the hour, a reply under the original carries the new version; a burst edits that reply", async () => {
+    const { db, w } = await setup();
+    age(db, "posted_at", 61);
+    expect(await bump(db, w)).toEqual([["editMessageText", 100], ["sendMessage", 100]]);
+    expect(w.telegram[1].body).toMatchObject({ message_thread_id: 3, text: expect.stringContaining(`${A} v2`) });
+    expect(await bump(db, w)).toEqual([["editMessageText", 100], ["editMessageText", 101]]);
+    expect(w.telegram[1].body.text).toContain(`${A} v3`);
+  });
+
+  test("a reply older than the hour, or deleted, gets a new reply", async () => {
+    const { db, w } = await setup();
+    age(db, "posted_at", 61);
+    await bump(db, w); // reply 101
+    age(db, "replied_at", 61);
+    expect(await bump(db, w)).toEqual([["editMessageText", 100], ["sendMessage", 100]]); // reply 102
+    w.deletedMessages.add(102);
+    expect(await bump(db, w)).toEqual([["editMessageText", 100], ["editMessageText", 102], ["sendMessage", 100]]);
+  });
+
+  test("a withdrawal after the hour blanks the original and says so underneath", async () => {
+    const { db, w } = await setup();
+    age(db, "posted_at", 61);
+    expect(await bump(db, w, { kind: "withdrawn" })).toEqual([["editMessageText", 100], ["sendMessage", 100]]);
+    expect(w.telegram[1].body.text).toBe("<b>B</b> · withdrawn");
+  });
+
+  test("migrated posts have no posted_at and count as old", async () => {
+    const { db, w } = await setup();
+    db.sqlite.exec("UPDATE imported SET posted_at = NULL");
+    expect(await bump(db, w)).toEqual([["editMessageText", 100], ["sendMessage", 100]]);
+  });
 });

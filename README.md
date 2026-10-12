@@ -9,7 +9,7 @@ blyxt is both publisher and subscriber. It is one Cloudflare Worker that receive
 One Telegram supergroup with Topics:
 
 - **Pub** — send text, it becomes a public fragment; edit it to publish a new version. Reply `/withdraw [note]` to a published post to withdraw it: its content is emptied everywhere and its page stays as an endcap; reply `/republish [note]` to bring it back. Pin a post in Telegram (or reply `/pin [vN]`) to pin that version forever at `items/{id}/v{n}.json` and `f/{id}/v{n}/`. (Planned: shared link → stub.)
-- **Sub** — `/subscribe <url>` follows a blyg (a blyg URL, its site's homepage, or its feed all work), `/unsubscribe <url>`, `/subscriptions`. Followed blygs are polled every 15 minutes: new items are posted here, new versions edit the posted message, withdrawals blank it.
+- **Sub** — `/subscribe <url>` follows a blyg (a blyg URL, its site's homepage, or its feed all work), `/unsubscribe <url>`, `/subscriptions`. Followed blygs are polled every 15 minutes: new items are posted here, new versions edit the posted message, withdrawals blank it. Once a post is over an hour old, a new version or withdrawal also gets a reply under it so it shows up at the bottom; more versions within the hour edit that reply.
 - **More Sub topics** — each is a grouping that follows its own blygs. `/newsub <name>` creates one (the bot needs the "manage topics" admin right); `/sub <name>` in any other topic adopts it, or renames a grouping. `/subscriptions` in the first Sub topic lists every grouping. A blyg followed in several groupings is fetched once per poll; deleting a topic drops its grouping.
 - **Admin** — status, AI chat. (Planned.)
 
