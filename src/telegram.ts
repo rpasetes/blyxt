@@ -117,7 +117,7 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
   const sub = { token: cfg.token, chatId: cfg.chatId, topicId: cfg.subTopicId };
 
   if (name === "subscriptions") {
-    const subs = await listSubscriptions(db);
+    const subs = await listSubscriptions(db, sub.topicId);
     const lines = subs.map((s) => `• ${s.title} — ${s.origin}${s.last_error ? ` (failing: ${s.last_error})` : ""}`);
     return reply(cfg, m, subs.length ? lines.join("\n") : `no subscriptions yet. ${USAGE}`);
   }
@@ -127,7 +127,7 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
     const found = await resolve(arg);
     if (found.type === "failed") return reply(cfg, m, `no blyg found at ${arg}. tried:\n${found.tried.join("\n") || "(invalid url)"}`);
     if (found.type === "legacy") return reply(cfg, m, `${arg} only has a plain RSS feed (${found.feedUrl}); legacy feeds aren't supported yet`);
-    if (await getSubscription(db, found.origin)) return reply(cfg, m, `already subscribed to ${found.origin}`);
+    if (await getSubscription(db, sub.topicId, found.origin)) return reply(cfg, m, `already subscribed to ${found.origin}`);
     try {
       const { title, count } = await addSubscription(db, sub, found.origin, found.manifest);
       const notes = found.warnings.map((w) => `\nnote: ${w}`).join("");
@@ -139,11 +139,11 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
 
   if (name === "unsubscribe") {
     if (!arg) return reply(cfg, m, "usage: /unsubscribe <url>");
-    const subs = await listSubscriptions(db);
+    const subs = await listSubscriptions(db, sub.topicId);
     const target = subs.find((s) => sameBlyg(s.origin, arg));
     const origin = target?.origin ?? (await resolveOrigin(arg));
-    if (!origin || !(await getSubscription(db, origin))) return reply(cfg, m, `not subscribed to ${arg}`);
-    await removeSubscription(db, origin);
+    if (!origin || !(await getSubscription(db, sub.topicId, origin))) return reply(cfg, m, `not subscribed to ${arg}`);
+    await removeSubscription(db, sub.topicId, origin);
     return reply(cfg, m, `unsubscribed from ${origin}`);
   }
 

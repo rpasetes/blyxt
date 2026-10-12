@@ -55,6 +55,6 @@ export default {
 
   // cron: poll followed blygs into the Sub topic
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(pollDue(env.DB, { token: env.TELEGRAM_BOT_TOKEN, chatId: Number(env.TELEGRAM_CHAT_ID), topicId: Number(env.SUB_TOPIC_ID) }));
+    ctx.waitUntil(pollDue(env.DB, { token: env.TELEGRAM_BOT_TOKEN, chatId: Number(env.TELEGRAM_CHAT_ID) }));
   },
 } satisfies ExportedHandler<Env>;

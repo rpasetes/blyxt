@@ -16,11 +16,21 @@ export type Subscription = {
   last_error: string | null;
 };
 
-type Imported = { item_id: string; version: number; kind: string; content_hash: string | null; tg_message_id: number | null };
+type Imported = {
+  topic_id: number;
+  item_id: string;
+  version: number;
+  kind: string;
+  content_hash: string | null;
+  tg_message_id: number | null;
+  posted_at?: string | null;
+};
 type IndexEntry = { id: string; kind: string; created?: string; version: number };
 type ItemDoc = { id: string; kind: string; version: number; content_html?: string; content_hash?: string; page?: string };
 
-export type Sub = { token: string; chatId: number; topicId: number };
+export type Bot = { token: string; chatId: number };
+// one Sub topic: a grouping of followed blygs
+export type Sub = Bot & { topicId: number };
 
 export const POLL_MINUTES = 15;
 const KINDS = new Set(["fragment", "thread", "withdrawn"]);
@@ -36,16 +46,21 @@ const get = (url: string, etag?: string | null) =>
     signal: AbortSignal.timeout(10_000),
   });
 
-export const listSubscriptions = async (db: D1Database) =>
-  (await db.prepare("SELECT * FROM subscriptions ORDER BY created").all<Subscription>()).results;
+// the blygs one Sub topic follows
+export const listSubscriptions = async (db: D1Database, topicId: number) =>
+  (await db.prepare("SELECT s.* FROM subscriptions s JOIN follows f ON f.origin = s.origin WHERE f.topic_id = ? ORDER BY f.created")
+    .bind(topicId).all<Subscription>()).results;
 
-export const getSubscription = (db: D1Database, origin: string) =>
-  db.prepare("SELECT * FROM subscriptions WHERE origin = ?").bind(origin).first<Subscription>();
+export const getSubscription = (db: D1Database, topicId: number, origin: string) =>
+  db.prepare("SELECT s.* FROM subscriptions s JOIN follows f ON f.origin = s.origin WHERE f.topic_id = ? AND s.origin = ?")
+    .bind(topicId, origin).first<Subscription>();
 
-export async function removeSubscription(db: D1Database, origin: string) {
+// unfollow in one topic; a blyg no topic follows anymore stops being polled
+export async function removeSubscription(db: D1Database, topicId: number, origin: string) {
   await db.batch([
-    db.prepare("DELETE FROM imported WHERE origin = ?").bind(origin),
-    db.prepare("DELETE FROM subscriptions WHERE origin = ?").bind(origin),
+    db.prepare("DELETE FROM imported WHERE topic_id = ? AND origin = ?").bind(topicId, origin),
+    db.prepare("DELETE FROM follows WHERE topic_id = ? AND origin = ?").bind(topicId, origin),
+    db.prepare("DELETE FROM subscriptions WHERE origin = ? AND NOT EXISTS (SELECT 1 FROM follows WHERE origin = ?)").bind(origin, origin),
   ]);
 }
 
@@ -83,7 +98,8 @@ async function fetchItem(origin: string, id: string): Promise<ItemDoc | null> {
 }
 
 // Subscribing baselines every current item without posting it, then shows the newest one.
-export async function addSubscription(db: D1Database, sub: Sub, origin: string, manifest: Manifest) {
+// A blyg another topic already follows keeps its fetch state; this topic gets its own watermarks.
+export async function addSubscription(db: D1Database, sub: Sub, origin: string, manifest: Manifest, topicName = "Sub") {
   const title = (typeof manifest.title === "string" && manifest.title.trim()) || new URL(origin).host;
   const indexUrl = new URL(typeof manifest.items === "string" ? manifest.items : "items/index.json", origin).href;
   const index = await fetchIndex(indexUrl);
@@ -91,10 +107,12 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
 
   const at = now();
   await db.batch([
-    db.prepare("INSERT INTO subscriptions (origin, title, index_url, index_etag, created, last_polled, next_poll) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    db.prepare("INSERT OR IGNORE INTO sub_topics (topic_id, name, created) VALUES (?, ?, ?)").bind(sub.topicId, topicName, at),
+    db.prepare("INSERT OR IGNORE INTO subscriptions (origin, title, index_url, index_etag, created, last_polled, next_poll) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .bind(origin, title, indexUrl, index.etag, at, at, minutesFromNow(POLL_MINUTES)),
+    db.prepare("INSERT INTO follows (topic_id, origin, created) VALUES (?, ?, ?)").bind(sub.topicId, origin, at),
     ...index.items.map((i) =>
-      db.prepare("INSERT OR IGNORE INTO imported (origin, item_id, version, kind) VALUES (?, ?, ?, ?)").bind(origin, i.id, i.version, i.kind),
+      db.prepare("INSERT OR IGNORE INTO imported (topic_id, origin, item_id, version, kind) VALUES (?, ?, ?, ?, ?)").bind(sub.topicId, origin, i.id, i.version, i.kind),
     ),
   ]);
 
@@ -102,7 +120,7 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
   if (newest) {
     const doc = await fetchItem(origin, newest.id);
     // the preview is a courtesy; if Telegram is busy the next new item shows up anyway
-    if (doc) await present(db, sub, { origin, title }, doc, { item_id: doc.id, version: 0, kind: doc.kind, content_hash: null, tg_message_id: null }).catch(() => {});
+    if (doc) await present(db, sub, { origin, title }, doc, { topic_id: sub.topicId, item_id: doc.id, version: 0, kind: doc.kind, content_hash: null, tg_message_id: null }).catch(() => {});
   }
   return { title, count: index.items.length };
 }
@@ -137,6 +155,7 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
 async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined) {
   const text = messageText(s.title, s.origin, doc);
   let messageId = row?.tg_message_id ?? null;
+  let postedAt = row?.posted_at ?? null;
 
   if (messageId) {
     const edited = await send(sub, "editMessageText", { chat_id: sub.chatId, message_id: messageId, text });
@@ -147,41 +166,56 @@ async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" 
   if (!messageId && doc.kind !== "withdrawn") {
     const sent = await send(sub, "sendMessage", { chat_id: sub.chatId, message_thread_id: sub.topicId, text });
     messageId = sent.ok ? (sent.result as { message_id: number }).message_id : null;
+    postedAt = messageId ? now() : null;
   }
 
   await db.prepare(
-    `INSERT INTO imported (origin, item_id, version, kind, content_hash, tg_message_id) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT (origin, item_id) DO UPDATE SET version = excluded.version, kind = excluded.kind, content_hash = excluded.content_hash, tg_message_id = excluded.tg_message_id`,
-  ).bind(s.origin, doc.id, doc.version, doc.kind, doc.content_hash ?? null, messageId).run();
+    `INSERT INTO imported (topic_id, origin, item_id, version, kind, content_hash, tg_message_id, posted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (topic_id, origin, item_id) DO UPDATE SET version = excluded.version, kind = excluded.kind, content_hash = excluded.content_hash,
+       tg_message_id = excluded.tg_message_id, posted_at = excluded.posted_at`,
+  ).bind(sub.topicId, s.origin, doc.id, doc.version, doc.kind, doc.content_hash ?? null, messageId, postedAt).run();
 }
 
-// One poll of one blyg: diff its archive index against our watermarks (§13.2).
-async function pollOne(db: D1Database, sub: Sub, s: Subscription, budget: { left: number }) {
+// One poll of one blyg: diff its archive index against each following topic's watermarks (§13.2).
+// Every changed item is fetched once, however many topics show it.
+async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left: number }) {
   budget.left--;
   const index = await fetchIndex(s.index_url, s.index_etag);
   if (index.status === "unchanged") return { ok: true as const };
   if (index.status === "error") return { ok: false as const, error: index.error, retryAfter: index.retryAfter };
 
-  const { results } = await db.prepare("SELECT item_id, version, kind, content_hash, tg_message_id FROM imported WHERE origin = ?").bind(s.origin).all<Imported>();
-  const seen = new Map(results.map((r) => [r.item_id, r]));
+  const topics = (await db.prepare("SELECT topic_id FROM follows WHERE origin = ? ORDER BY created").bind(s.origin).all<{ topic_id: number }>()).results
+    .map((f) => f.topic_id);
+  const { results } = await db.prepare("SELECT topic_id, item_id, version, kind, content_hash, tg_message_id, posted_at FROM imported WHERE origin = ?")
+    .bind(s.origin).all<Imported>();
+  const seen = new Map(topics.map((t) => [t, new Map<string, Imported>()]));
+  for (const r of results) seen.get(r.topic_id)?.set(r.item_id, r);
+  // an item is behind when any following topic hasn't shown its current version
+  const behind = (entry: IndexEntry, t: number) => entry.version > (seen.get(t)!.get(entry.id)?.version ?? 0);
   const changed = index.items
-    .filter((i) => i.version > (seen.get(i.id)?.version ?? 0))
+    .filter((i) => topics.some((t) => behind(i, t)))
     .sort((a, b) => (a.created ?? "").localeCompare(b.created ?? ""));
 
   let complete = true;
-  for (const entry of changed) {
+  items: for (const entry of changed) {
     if (budget.left <= 0) { complete = false; break; }
     budget.left--;
     const doc = await fetchItem(s.origin, entry.id);
-    const row = seen.get(entry.id);
-    // the document is ground truth; never adopt a version below the watermark (§13.3)
-    if (!doc || doc.version <= (row?.version ?? 0)) { complete = false; continue; }
-    try {
-      await present(db, sub, s, doc, row);
-    } catch (e) {
-      if (!(e instanceof Retry)) throw e;
-      complete = false;
-      break;
+    if (!doc) { complete = false; continue; }
+    for (const topicId of topics) {
+      const row = seen.get(topicId)!.get(entry.id);
+      // the document is ground truth; never adopt a version below the watermark (§13.3)
+      if (doc.version <= (row?.version ?? 0)) {
+        if (behind(entry, topicId)) complete = false;
+        continue;
+      }
+      try {
+        await present(db, { ...bot, topicId }, s, doc, row);
+      } catch (e) {
+        if (!(e instanceof Retry)) throw e;
+        complete = false;
+        break items;
+      }
     }
   }
   // only remember the index's ETag once everything it listed has been applied
@@ -189,12 +223,12 @@ async function pollOne(db: D1Database, sub: Sub, s: Subscription, budget: { left
   return { ok: true as const };
 }
 
-export async function pollDue(db: D1Database, sub: Sub) {
+export async function pollDue(db: D1Database, bot: Bot) {
   const { results } = await db.prepare("SELECT * FROM subscriptions WHERE next_poll <= ? ORDER BY next_poll").bind(now()).all<Subscription>();
   const budget = { left: FETCH_BUDGET };
   for (const s of results) {
     if (budget.left <= 0) break;
-    const result = await pollOne(db, sub, s, budget).catch((e) => ({ ok: false as const, error: String(e), retryAfter: null }));
+    const result = await pollOne(db, bot, s, budget).catch((e) => ({ ok: false as const, error: String(e), retryAfter: null }));
     if (result.ok) {
       await db.prepare("UPDATE subscriptions SET last_polled = ?, next_poll = ?, failures = 0, last_error = NULL WHERE origin = ?")
         .bind(now(), minutesFromNow(POLL_MINUTES), s.origin).run();
