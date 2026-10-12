@@ -1,2 +1,4 @@
 TELEGRAM_BOT_TOKEN=123456:ABC...
 TELEGRAM_WEBHOOK_SECRET=any-long-random-string
+# optional: lets `bun run draft` submit drafts to Pub (same value as the Worker secret)
+DRAFT_TOKEN=another-long-random-string

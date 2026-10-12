@@ -1,4 +1,5 @@
 import type { Site } from "./blyg";
+import { handleDraftRequest } from "./drafts";
 import { serveBlyg } from "./serve";
 import { pollDue } from "./subscribe";
 import { handleUpdate, type TgUpdate } from "./telegram";
@@ -16,9 +17,20 @@ export type Env = {
   OWNER_USER_ID: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
+  // lets other clients submit drafts to Pub; unset, the endpoint doesn't exist
+  DRAFT_TOKEN?: string;
 };
 
 const WEBHOOK_PATH = "/telegram/webhook";
+const DRAFTS_PATH = "/api/drafts";
+
+const configOf = (env: Env) => ({
+  token: env.TELEGRAM_BOT_TOKEN,
+  chatId: Number(env.TELEGRAM_CHAT_ID),
+  pubTopicId: Number(env.PUB_TOPIC_ID),
+  subTopicId: Number(env.SUB_TOPIC_ID),
+  ownerId: Number(env.OWNER_USER_ID),
+});
 
 const siteOf = (env: Env): Site => ({
   origin: env.ORIGIN,
@@ -36,17 +48,13 @@ export default {
       if (req.headers.get("x-telegram-bot-api-secret-token") !== env.TELEGRAM_WEBHOOK_SECRET) {
         return new Response("forbidden\n", { status: 403 });
       }
-      const after = await handleUpdate((await req.json()) as TgUpdate, env.DB, siteOf(env), {
-        token: env.TELEGRAM_BOT_TOKEN,
-        chatId: Number(env.TELEGRAM_CHAT_ID),
-        pubTopicId: Number(env.PUB_TOPIC_ID),
-        subTopicId: Number(env.SUB_TOPIC_ID),
-        ownerId: Number(env.OWNER_USER_ID),
-      });
+      const after = await handleUpdate((await req.json()) as TgUpdate, env.DB, siteOf(env), configOf(env));
       // acknowledge Telegram first; the confirmation reply goes out after
       if (after) ctx.waitUntil(after());
       return new Response("ok\n");
     }
+
+    if (url.pathname === DRAFTS_PATH) return handleDraftRequest(req, env.DB, siteOf(env), configOf(env), env.DRAFT_TOKEN);
 
     if (req.method !== "GET" && req.method !== "HEAD") return new Response("method not allowed\n", { status: 405 });
     // Vercel rewrites rslantonie.com/blyg/:path* → this Worker's /:path*

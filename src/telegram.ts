@@ -2,6 +2,7 @@
 // Bot API: https://core.telegram.org/bots/api
 import { FRAGMENT_CAP, ID_RE, overCap, pagePath, type Site } from "./blyg";
 import { compose } from "./compose";
+import { deleteDraft, draftForMessage } from "./drafts";
 import { resolve } from "./resolve";
 import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, withdraw } from "./store";
 import {
@@ -131,7 +132,7 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   return () => reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
 }
 
-const PUB_USAGE = "reply to a published post with /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note])";
+const PUB_USAGE = "reply to a published post with /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); reply to a draft with /publish or /discard";
 
 // the post a command names: the message it replies to, else a link or id as the first argument
 // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
@@ -146,6 +147,7 @@ async function target(m: TgMessage, db: D1Database, args: string[]) {
 async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
   const [command, ...args] = m.text!.trim().split(/\s+/);
   const name = command.slice(1).split("@")[0].toLowerCase();
+  if (name === "publish" || name === "discard") return handleDraftCommand(m, name, db, site, cfg);
   if (!["withdraw", "republish", "pin"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
   const id = await target(m, db, args);
   if (!id) return () => reply(cfg, m, PUB_USAGE);
@@ -158,6 +160,39 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
   const existing = await getItem(db, id);
   if (!existing) return () => reply(cfg, m, `no post ${id} on this blyg`);
   return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
+}
+
+// a draft another client submitted becomes v1 only when you /publish it in Pub; the preview message
+// then stands for the post, so /withdraw and /pin work on it like on your own messages
+async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db: D1Database, site: Site, cfg: Config) {
+  const to = m.reply_to_message?.message_id;
+  const draft = to && (await draftForMessage(db, m.chat.id, to));
+  if (!draft) {
+    // a retried /publish finds the draft already gone and the post in its place
+    const published = to && (await itemForMessage(db, m.chat.id, to));
+    const item = published && (await getItem(db, published.item_id));
+    if (item) return () => reply(cfg, m, `already published → ${site.origin}${pagePath(item)}`);
+    return () => reply(cfg, m, `reply /${name} to a draft's preview`);
+  }
+
+  if (name === "discard") {
+    // nothing was ever public: a hard delete (§9)
+    await deleteDraft(db, draft.id);
+    return async () => {
+      for (const id of [draft.message_id, draft.file_message_id]) if (id) await tg(cfg.token, "deleteMessage", { chat_id: cfg.chatId, message_id: id });
+      await tg(cfg.token, "sendMessage", { chat_id: cfg.chatId, message_thread_id: cfg.pubTopicId, text: "discarded the draft; nothing was published" });
+    };
+  }
+
+  // quoted posts may have changed since the draft arrived: it publishes against them as they are now
+  const composed = await compose(db, site.origin, draft.content_md);
+  if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. the draft stays; /discard it and send a new one`);
+  const long = !composed.thread && overCap(draft.content_md);
+  const kind = composed.thread || long ? "thread" : "fragment";
+  const generated = draft.generated ? JSON.parse(draft.generated) : undefined;
+  const item = await publishNew(db, kind, { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, generated }, { chatId: m.chat.id, messageId: draft.message_id! });
+  await deleteDraft(db, draft.id);
+  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${generated ? " (marked machine-generated)" : ""} → ${site.origin}${pagePath(item)}`);
 }
 
 // a withdrawn post comes back as its next version: the replied-to message's text as it reads now,
