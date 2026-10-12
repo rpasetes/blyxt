@@ -1,6 +1,7 @@
 // Read side of the Sub topic: subscriptions and polling (spec §12.3, §13).
 import { contentHash, ID_RE, now } from "./blyg";
 import { USER_AGENT, type Manifest } from "./resolve";
+import { parseFeed, syntheticId, type LegacyEntry } from "./rss";
 import { toTelegramHtml } from "./tghtml";
 import { tg } from "./telegram";
 
@@ -17,6 +18,8 @@ export type Subscription = {
   feed_url: string | null;
   // 1 while following the feed because the archive index is missing
   lossy: number;
+  // 1 for a plain RSS/Atom feed (L0); origin and index_url are then the feed URL
+  legacy: number;
 };
 
 type Imported = {
@@ -219,8 +222,7 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
 // Show a document in the Sub topic: a new message for a new item, an edit for a later version.
 // Edits don't move a message, so a later version of an older post also gets a reply under it,
 // and a burst of versions keeps editing that one reply while it's fresh.
-async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined) {
-  const text = messageText(s.title, s.origin, doc);
+async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined, text = messageText(s.title, s.origin, doc)) {
   let messageId = row?.tg_message_id ?? null;
   let postedAt = row?.posted_at ?? null;
   let replyId = row?.reply_message_id ?? null;
@@ -352,7 +354,7 @@ async function followers(db: D1Database, origin: string) {
 async function sweep(db: D1Database, bot: Bot, budget: { left: number }) {
   const { results } = await db.prepare(
     `SELECT s.*, i.item_id FROM imported i JOIN subscriptions s ON s.origin = i.origin
-     WHERE i.kind != 'withdrawn' AND s.failures = 0 GROUP BY i.origin, i.item_id
+     WHERE i.kind != 'withdrawn' AND s.failures = 0 AND s.legacy = 0 GROUP BY i.origin, i.item_id
      HAVING MIN(COALESCE(i.checked_at, '')) < ? ORDER BY MIN(COALESCE(i.checked_at, '')) LIMIT ?`,
   ).bind(minutesFromNow(-RECHECK_HOURS * 60), Math.min(SWEEP, budget.left)).all<Subscription & { item_id: string }>();
   for (const { item_id, ...s } of results) {
@@ -370,6 +372,7 @@ async function sweep(db: D1Database, bot: Bot, budget: { left: number }) {
 // One poll of one blyg: diff its archive index against each following topic's watermarks (§13.2).
 // Every changed item is fetched once, however many topics show it.
 async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left: number }) {
+  if (s.legacy) return pollLegacy(db, bot, s, budget);
   budget.left--;
   // while lossy, the stored ETag is the feed's
   let index = await fetchIndex(s.index_url, s.lossy ? null : s.index_etag);
@@ -408,6 +411,86 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
   }
   // only remember the index's ETag once everything it listed has been applied
   await db.prepare("UPDATE subscriptions SET index_etag = ? WHERE origin = ?").bind(complete ? index.etag : null, s.origin).run();
+  return { ok: true as const };
+}
+
+// Legacy (L0) feeds, §13.6: each entry is a summary + link under a synthetic id. RSS has no versions,
+// so changed content under the same GUID is a local version bump; entries leaving the window are kept.
+
+const LEGACY_SUMMARY = 1000;
+
+const legacyHash = (e: LegacyEntry) => contentHash(`${e.title}\n${e.link ?? ""}\n${e.summary}`);
+
+// visibly marked as wrapped legacy content
+export function legacyText(feedTitle: string, e: LegacyEntry, version: number) {
+  const heading = e.title || e.link || "untitled";
+  const title = e.link ? `<a href="${esc(e.link)}">${esc(heading)}</a>` : esc(heading);
+  const summary = toTelegramHtml(e.summary, e.link ?? "https://invalid./", LEGACY_SUMMARY);
+  return `<b>${esc(feedTitle)}</b> · RSS${version > 1 ? " · updated" : ""}\n\n<b>${title}</b>${summary ? `\n\n${summary}` : ""}`;
+}
+
+const fetchLegacy = async (url: string, etag?: string | null) => {
+  const res = await get(url, etag, "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.1");
+  if (res.status === 304) return { status: "unchanged" as const };
+  if (!res.ok) return { status: "error" as const, error: `${res.status} from ${url}`, retryAfter: res.headers.get("retry-after") };
+  return { status: "ok" as const, feed: parseFeed(await res.text(), url), etag: res.headers.get("etag") };
+};
+
+// like addSubscription: baseline every entry in the window, then show the newest
+export async function addLegacySubscription(db: D1Database, sub: Sub, feedUrl: string, topicName = "Sub") {
+  const got = await fetchLegacy(feedUrl);
+  if (got.status !== "ok") throw new Error(got.status === "error" ? got.error : "feed unavailable");
+  const title = got.feed.title || new URL(feedUrl).host;
+  const at = now();
+  const rows = await Promise.all(got.feed.entries.map(async (e) => ({ id: await syntheticId(e.key), hash: await legacyHash(e) })));
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO sub_topics (topic_id, name, created) VALUES (?, ?, ?)").bind(sub.topicId, topicName, at),
+    db.prepare("INSERT OR IGNORE INTO subscriptions (origin, title, index_url, feed_url, legacy, index_etag, created, last_polled, next_poll) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)")
+      .bind(feedUrl, title, feedUrl, feedUrl, got.etag, at, at, minutesFromNow(POLL_MINUTES)),
+    db.prepare("INSERT INTO follows (topic_id, origin, created) VALUES (?, ?, ?)").bind(sub.topicId, feedUrl, at),
+    ...rows.map((r) =>
+      db.prepare("INSERT OR IGNORE INTO imported (topic_id, origin, item_id, version, kind, content_hash) VALUES (?, ?, ?, 1, 'l0', ?)").bind(sub.topicId, feedUrl, r.id, r.hash),
+    ),
+  ]);
+  const newest = got.feed.entries[0];
+  if (newest) {
+    const doc = { id: rows[0].id, kind: "l0", version: 1, content_hash: rows[0].hash };
+    await present(db, sub, { origin: feedUrl, title }, doc, undefined, legacyText(title, newest, 1)).catch(() => {});
+  }
+  return { title, count: got.feed.entries.length };
+}
+
+async function pollLegacy(db: D1Database, bot: Bot, s: Subscription, budget: { left: number }) {
+  budget.left--;
+  const got = await fetchLegacy(s.index_url, s.index_etag);
+  if (got.status === "unchanged") return { ok: true as const };
+  if (got.status === "error") return { ok: false as const, error: got.error, retryAfter: got.retryAfter };
+
+  const { topics, seen } = await followers(db, s.origin);
+  let complete = true;
+  // feeds list newest first; post oldest first
+  entries: for (const e of [...got.feed.entries].reverse()) {
+    const id = await syntheticId(e.key);
+    const hash = await legacyHash(e);
+    for (const topicId of [...topics]) {
+      const row = seen.get(topicId)!.get(id);
+      if (row?.content_hash === hash) continue;
+      const version = (row?.version ?? 0) + 1;
+      try {
+        await present(db, { ...bot, topicId }, s, { id, kind: "l0", version, content_hash: hash }, row, legacyText(s.title, e, version));
+      } catch (err) {
+        if (err instanceof TopicGone) {
+          await removeSubTopic(db, topicId);
+          topics.splice(topics.indexOf(topicId), 1);
+          continue;
+        }
+        if (!(err instanceof Retry)) throw err;
+        complete = false;
+        break entries;
+      }
+    }
+  }
+  await db.prepare("UPDATE subscriptions SET index_etag = ? WHERE origin = ?").bind(complete ? got.etag : null, s.origin).run();
   return { ok: true as const };
 }
 

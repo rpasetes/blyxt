@@ -5,6 +5,7 @@ import { compose } from "./compose";
 import { resolve } from "./resolve";
 import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, withdraw } from "./store";
 import {
+  addLegacySubscription,
   addSubscription,
   getSubscription,
   getSubTopic,
@@ -208,8 +209,8 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
   const home = sub.topicId === cfg.subTopicId;
 
   if (name === "subscriptions") {
-    const line = (s: { title?: string; origin?: string; last_error?: string | null; lossy?: number }) =>
-      `• ${s.title} — ${s.origin}${s.lossy ? " (feed only: no archive index)" : ""}${s.last_error ? ` (failing: ${s.last_error})` : ""}`;
+    const line = (s: { title?: string; origin?: string; last_error?: string | null; lossy?: number; legacy?: number }) =>
+      `• ${s.title} — ${s.origin}${s.legacy ? " (RSS)" : ""}${s.lossy ? " (feed only: no archive index)" : ""}${s.last_error ? ` (failing: ${s.last_error})` : ""}`;
     if (!home) {
       const subs = await listSubscriptions(db, sub.topicId);
       return reply(cfg, m, subs.length ? subs.map(line).join("\n") : `no subscriptions here yet. ${USAGE}`);
@@ -248,7 +249,15 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
     if (!arg) return reply(cfg, m, `usage: /subscribe <url of a blyg, its homepage, or its feed>`);
     const found = await resolve(arg);
     if (found.type === "failed") return reply(cfg, m, `no blyg found at ${arg}. tried:\n${found.tried.join("\n") || "(invalid url)"}`);
-    if (found.type === "legacy") return reply(cfg, m, `${arg} only has a plain RSS feed (${found.feedUrl}); legacy feeds aren't supported yet`);
+    if (found.type === "legacy") {
+      if (await getSubscription(db, sub.topicId, found.feedUrl)) return reply(cfg, m, `already subscribed to ${found.feedUrl} here`);
+      try {
+        const { title, count } = await addLegacySubscription(db, sub, found.feedUrl);
+        return reply(cfg, m, `subscribed to ${title} — ${found.feedUrl}\nit's a plain RSS feed, not a blyg: posts show here as a title, summary and link (marked RSS), and only what's in the feed when blyxt looks. ${count} in the feed now`);
+      } catch (e) {
+        return reply(cfg, m, `found a feed at ${found.feedUrl} but couldn't read it: ${(e as Error).message}`);
+      }
+    }
     if (await getSubscription(db, sub.topicId, found.origin)) return reply(cfg, m, `already subscribed to ${found.origin} here`);
     try {
       const { title, count, lossy } = await addSubscription(db, sub, found.origin, found.manifest);
@@ -281,5 +290,5 @@ function sameBlyg(origin: string, input: string) {
 
 async function resolveOrigin(input: string) {
   const found = await resolve(input);
-  return found.type === "blyg" ? found.origin : null;
+  return found.type === "blyg" ? found.origin : found.type === "legacy" ? found.feedUrl : null;
 }
