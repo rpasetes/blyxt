@@ -231,6 +231,59 @@ async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" 
   ).bind(sub.topicId, s.origin, doc.id, doc.version, doc.kind, doc.content_hash ?? null, messageId, postedAt, replyId, repliedAt).run();
 }
 
+type Seen = Map<number, Map<string, Imported>>;
+
+// Bring every following topic up to a fetched document. "pending" when the index promised a version
+// the document doesn't have yet (a lagging cache: fetch again next poll), "retry" when Telegram said later.
+async function applyDoc(db: D1Database, bot: Bot, s: Subscription, doc: ItemDoc, topics: number[], seen: Seen, listed?: number) {
+  const watermarks = topics.map((t) => seen.get(t)!.get(doc.id)?.version ?? 0);
+  try {
+    // the watermark never regresses; a document below it is the origin rewriting history (§13.3)
+    const highest = Math.max(0, ...watermarks);
+    if (doc.version < highest) {
+      await discrepancy(db, bot, s, topics, seen, doc, "regression", String(highest),
+        `⚠ ${s.title} served v${doc.version} of this post after showing v${highest}: its history went backwards. blyxt keeps v${highest}.`);
+    }
+    let pending = false;
+    for (const topicId of [...topics]) {
+      const row = seen.get(topicId)!.get(doc.id);
+      if (doc.version <= (row?.version ?? 0)) {
+        if ((listed ?? 0) > doc.version && doc.version === row?.version) pending = true;
+        continue;
+      }
+      try {
+        await present(db, { ...bot, topicId }, s, doc, row);
+      } catch (e) {
+        if (!(e instanceof TopicGone)) throw e;
+        await removeSubTopic(db, topicId);
+        topics.splice(topics.indexOf(topicId), 1);
+      }
+    }
+    return pending ? "pending" : "done";
+  } catch (e) {
+    if (e instanceof Retry) return "retry";
+    throw e;
+  }
+}
+
+// record a protocol violation and tell every following topic, once; the notice replies under the post where it can
+async function discrepancy(db: D1Database, bot: Bot, s: Subscription, topics: number[], seen: Seen, doc: ItemDoc, kind: string, detail: string, text: string) {
+  const known = await db.prepare("SELECT 1 FROM discrepancies WHERE origin = ? AND item_id = ? AND kind = ? AND version = ? AND detail = ?")
+    .bind(s.origin, doc.id, kind, doc.version, detail).first();
+  if (known) return;
+  for (const topicId of topics) {
+    const messageId = seen.get(topicId)!.get(doc.id)?.tg_message_id;
+    await send({ ...bot, topicId }, "sendMessage", {
+      chat_id: bot.chatId,
+      message_thread_id: topicId,
+      ...(messageId ? { reply_parameters: { message_id: messageId, allow_sending_without_reply: true } } : {}),
+      text: esc(text),
+    }).catch((e) => { if (!(e instanceof TopicGone)) throw e; });
+  }
+  await db.prepare("INSERT OR IGNORE INTO discrepancies (origin, item_id, kind, version, detail, at) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(s.origin, doc.id, kind, doc.version, detail, now()).run();
+}
+
 // One poll of one blyg: diff its archive index against each following topic's watermarks (§13.2).
 // Every changed item is fetched once, however many topics show it.
 async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left: number }) {
@@ -243,7 +296,7 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
     .map((f) => f.topic_id);
   const { results } = await db.prepare("SELECT * FROM imported WHERE origin = ?")
     .bind(s.origin).all<Imported>();
-  const seen = new Map(topics.map((t) => [t, new Map<string, Imported>()]));
+  const seen: Seen = new Map(topics.map((t) => [t, new Map<string, Imported>()]));
   for (const r of results) seen.get(r.topic_id)?.set(r.item_id, r);
   // an item is behind when any following topic hasn't shown its current version
   const behind = (entry: IndexEntry, t: number) => entry.version > (seen.get(t)!.get(entry.id)?.version ?? 0);
@@ -252,31 +305,14 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
     .sort((a, b) => (a.created ?? "").localeCompare(b.created ?? ""));
 
   let complete = true;
-  items: for (const entry of changed) {
+  for (const entry of changed) {
     if (budget.left <= 0) { complete = false; break; }
     budget.left--;
     const doc = await fetchItem(s.origin, entry.id);
     if (!doc) { complete = false; continue; }
-    for (const topicId of [...topics]) {
-      const row = seen.get(topicId)!.get(entry.id);
-      // the document is ground truth; never adopt a version below the watermark (§13.3)
-      if (doc.version <= (row?.version ?? 0)) {
-        if (behind(entry, topicId)) complete = false;
-        continue;
-      }
-      try {
-        await present(db, { ...bot, topicId }, s, doc, row);
-      } catch (e) {
-        if (e instanceof TopicGone) {
-          await removeSubTopic(db, topicId);
-          topics.splice(topics.indexOf(topicId), 1);
-          continue;
-        }
-        if (!(e instanceof Retry)) throw e;
-        complete = false;
-        break items;
-      }
-    }
+    const result = await applyDoc(db, bot, s, doc, topics, seen, entry.version);
+    if (result === "pending") complete = false;
+    if (result === "retry") { complete = false; break; }
   }
   // only remember the index's ETag once everything it listed has been applied
   await db.prepare("UPDATE subscriptions SET index_etag = ? WHERE origin = ?").bind(complete ? index.etag : null, s.origin).run();
