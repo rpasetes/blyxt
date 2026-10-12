@@ -1,6 +1,6 @@
 // Read side of the blyg: every protocol surface, rendered from D1 on request.
-import { archiveIndex, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, type Item, type Site } from "./blyg";
-import { changelog, getItem, lastUpdated, listItems, recentEvents } from "./store";
+import { archiveIndex, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, pinnedDocument, pinnedPage, type Item, type Site } from "./blyg";
+import { changelog, getItem, getPinned, lastUpdated, listItems, recentEvents } from "./store";
 
 const TYPES = {
   json: "application/json; charset=utf-8",
@@ -45,13 +45,26 @@ export async function serveBlyg(req: Request, db: D1Database, site: Site, path: 
     return item ? json(req, itemDocument(site, item, await changelog(db, item.id))) : notFound();
   }
 
-  m = path.match(/^([ft])\/([0-9a-z]{26})\/$/);
+  // pinned versions: 404 unless that exact version is pinned, 200 forever once it is (§8)
+  m = path.match(/^items\/([0-9a-z]{26})\/v([1-9]\d*)\.json$/);
+  if (m && ID_RE.test(m[1])) {
+    const v = await getPinned(db, m[1], Number(m[2]));
+    return v ? json(req, pinnedDocument(site, v)) : notFound();
+  }
+
+  m = path.match(/^([ft])\/([0-9a-z]{26})\/(?:v([1-9]\d*)\/)?$/);
   if (m && ID_RE.test(m[2])) {
     const item = await getItem(db, m[2]);
     if (!item) return notFound();
     // a fragment/thread page lives at one canonical path
-    if (pagePath(item) !== path) return Response.redirect(site.origin + pagePath(item), 301);
-    return respond(req, itemPage(site, item), "html");
+    const canonical = pagePath(item) + (m[3] ? `v${m[3]}/` : "");
+    if (canonical !== path) return Response.redirect(site.origin + canonical, 301);
+    if (m[3]) {
+      const v = await getPinned(db, item.id, Number(m[3]));
+      return v ? respond(req, pinnedPage(site, item, v), "html") : notFound();
+    }
+    const pins = (await changelog(db, item.id)).filter((c) => c.pinned).map((c) => c.version);
+    return respond(req, itemPage(site, item, pins), "html");
   }
 
   return notFound(path);

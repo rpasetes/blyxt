@@ -105,3 +105,46 @@ export async function withdraw(db: D1Database, id: string, note: string | null) 
   ]);
   return next;
 }
+
+export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string };
+
+// a pinned version's content, or null: unpinned history is never served (§8)
+export const getPinned = (db: D1Database, id: string, version: number) =>
+  db.prepare("SELECT * FROM versions WHERE item_id = ? AND version = ? AND pinned = 1").bind(id, version).first<PinnedVersion>();
+
+// pins are irrevocable and emit no feed event; updated stays the latest changelog entry's time (§5.3, §7, §8)
+export async function pin(db: D1Database, id: string, version: number) {
+  const row = await db.prepare("SELECT kind, pinned FROM versions WHERE item_id = ? AND version = ?").bind(id, version).first<{ kind: string; pinned: number }>();
+  if (!row) return "no such version" as const;
+  if (row.kind === "withdrawn") return "endcap" as const;
+  if (row.pinned) return "already" as const;
+  await db.prepare("UPDATE versions SET pinned = 1 WHERE item_id = ? AND version = ?").bind(id, version).run();
+  return "pinned" as const;
+}
+
+// the last content a withdrawn item published, to bring it back with
+export const lastContent = (db: D1Database, id: string) =>
+  db.prepare("SELECT content_md FROM versions WHERE item_id = ? AND kind != 'withdrawn' ORDER BY version DESC LIMIT 1").bind(id).first<{ content_md: string }>();
+
+// a withdrawn item returns under its id: vN+1 with its authored kind (§9); null unless it is withdrawn
+export async function republish(db: D1Database, id: string, md: string, html: string, note: string | null) {
+  const item = await getItem(db, id);
+  if (!item || item.kind !== "withdrawn") return null;
+  const at = now();
+  const next: Item = {
+    ...item,
+    kind: item.authored_kind,
+    updated: at,
+    version: item.version + 1,
+    content_md: md,
+    content_html: html,
+    content_hash: await contentHash(md),
+  };
+  await db.batch([
+    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ? WHERE id = ? AND version = ?")
+      .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, id, item.version),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(id, next.version, next.kind, at, note, next.content_md, next.content_html, next.content_hash),
+  ]);
+  return next;
+}

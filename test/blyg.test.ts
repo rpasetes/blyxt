@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { contentHash, directiveLines, excerpt, feed, ID_RE, itemDocument, linkIds, newId, pagePath, render, type Item, type Site } from "../src/blyg";
+import { contentHash, directiveLines, excerpt, feed, ID_RE, itemDocument, itemPage, linkIds, newId, pagePath, pinnedDocument, render, type Item, type Site } from "../src/blyg";
 
 const site: Site = { origin: "https://example.com/blyg/", title: "t", subtitle: "s", author: { name: "a", url: "https://example.com/" } };
 const item: Item = {
@@ -83,4 +83,15 @@ test("a withdrawal entry is titled withdrawn with an empty description", () => {
   expect(xml).toContain("<title>withdrawn</title>");
   expect(xml).toContain("<description><![CDATA[]]></description>");
   expect(xml).toContain("<link>https://example.com/blyg/f/7c9wk2mhq0v3xj8tn5rzfd41bg/</link>");
+});
+
+test("a pinned version document is frozen and absolute", () => {
+  const v = { item_id: item.id, version: 1, kind: "fragment" as const, at: item.created, note: null, pinned: 1, content_md: "x", content_html: '<p><a href="/a">a</a></p>', content_hash: "sha256:y" };
+  expect(pinnedDocument(site, v)).toMatchObject({ id: item.id, version: 1, pinned: true, content_html: '<p><a href="https://example.com/a">a</a></p>' });
+});
+
+test("the live page cites only its pins", () => {
+  const html = itemPage(site, { ...item, version: 3 }, [1]);
+  expect(html).toContain('pinned: <a href="https://example.com/blyg/f/7c9wk2mhq0v3xj8tn5rzfd41bg/v1/">v1</a>');
+  expect(html).not.toContain("v2");
 });
