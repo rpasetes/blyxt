@@ -4,7 +4,7 @@ import { FRAGMENT_CAP, ID_RE, overCap, pagePath, type Site } from "./blyg";
 import { compose } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
 import { resolve } from "./resolve";
-import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, withdraw } from "./store";
+import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, revise, withdraw } from "./store";
 import {
   addLegacySubscription,
   addSubscription,
@@ -185,14 +185,32 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
   }
 
   // quoted posts may have changed since the draft arrived: it publishes against them as they are now
-  const composed = await compose(db, site.origin, draft.content_md);
+  const composed = await compose(db, site.origin, draft.content_md, draft.item_id ?? undefined);
   if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. the draft stays; /discard it and send a new one`);
+  const generated = draft.generated ? JSON.parse(draft.generated) : undefined;
+  const marked = generated ? " (marked machine-generated)" : "";
+
+  if (draft.item_id) {
+    const c = { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, generated };
+    const item = await revise(db, draft.item_id, draft.base_version!, c, draft.note, !!draft.note_generated);
+    if (!item) {
+      const now = await getItem(db, draft.item_id);
+      return () => reply(cfg, m, now?.kind === "withdrawn"
+        ? "not published: the post was withdrawn since this draft. /republish it, then ask for a new revision"
+        : `not published: the post moved to v${now?.version} since this draft was written against v${draft.base_version}. /discard it and ask for a new revision`);
+    }
+    // the revision's preview stands for the post too, so commands work replying to either
+    await db.batch([
+      db.prepare("INSERT OR IGNORE INTO tg_messages (chat_id, message_id, item_id) VALUES (?, ?, ?)").bind(m.chat.id, draft.message_id, item.id),
+      db.prepare("DELETE FROM drafts WHERE id = ?").bind(draft.id),
+    ]);
+    return () => reply(cfg, m, `published v${item.version}${marked} → ${site.origin}${pagePath(item)}`);
+  }
   const long = !composed.thread && overCap(draft.content_md);
   const kind = composed.thread || long ? "thread" : "fragment";
-  const generated = draft.generated ? JSON.parse(draft.generated) : undefined;
   const item = await publishNew(db, kind, { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, generated }, { chatId: m.chat.id, messageId: draft.message_id! });
   await deleteDraft(db, draft.id);
-  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${generated ? " (marked machine-generated)" : ""} → ${site.origin}${pagePath(item)}`);
+  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${marked} → ${site.origin}${pagePath(item)}`);
 }
 
 // a withdrawn post comes back as its next version: the replied-to message's text as it reads now,

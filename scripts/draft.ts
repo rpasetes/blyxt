@@ -1,18 +1,27 @@
 // Sends a markdown file to Pub as a draft; it publishes only when you reply /publish to it there.
-//   bun run draft <file.md> [--generated-by <model>] [--source <id>@v<n> ...]
+//   bun run draft <file.md> [--generated-by <model>] [--source <id>@v<n> ...] [--update <id|link> [--note <text>] [--note-generated]]
 // --generated-by marks the whole body machine-generated (§5.7); --source names a post of this blyg it drew on.
+// --update makes it a revision draft: publishing it makes that post's next version, with --note in its changelog
+// (--note-generated when the client wrote the note, not the author, §5.2).
 // Needs DRAFT_TOKEN (e.g. in .dev.vars); BLYXT_URL defaults to the deployed Worker.
 import { parseArgs } from "node:util";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
-  options: { "generated-by": { type: "string" }, source: { type: "string", multiple: true } },
+  options: {
+    "generated-by": { type: "string" },
+    source: { type: "string", multiple: true },
+    update: { type: "string" },
+    note: { type: "string" },
+    "note-generated": { type: "boolean" },
+  },
 });
 const [file] = positionals;
 const token = process.env.DRAFT_TOKEN;
 const base = process.env.BLYXT_URL ?? "https://blyxt.blyxt.workers.dev";
 if (!file || !token) throw new Error("usage: bun run draft <file.md> [--generated-by <model>] [--source <id>@v<n> ...]  (needs DRAFT_TOKEN)");
 if (values.source?.length && !values["generated-by"]) throw new Error("--source describes a generated draft; add --generated-by <model>");
+if ((values.note || values["note-generated"]) && !values.update) throw new Error("--note describes a revision; add --update <id>");
 
 const sources = (values.source ?? []).map((s) => {
   const m = s.match(/^([0-9a-z]{26})@v([1-9]\d*)$/);
@@ -24,8 +33,12 @@ const generated = values["generated-by"] ? { model: values["generated-by"], sour
 const res = await fetch(new URL("/api/drafts", base), {
   method: "POST",
   headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-  body: JSON.stringify({ content_md: await Bun.file(file).text(), generated }),
+  body: JSON.stringify({
+    content_md: await Bun.file(file).text(),
+    generated,
+    ...(values.update ? { update: values.update, note: values.note, note_generated: !!values["note-generated"] } : {}),
+  }),
 });
-const out = (await res.json().catch(() => ({ error: `${res.status} ${res.statusText}` }))) as { id?: string; kind?: string; error?: string };
+const out = (await res.json().catch(() => ({ error: `${res.status} ${res.statusText}` }))) as { id?: string; kind?: string; version?: number; error?: string };
 if (!res.ok) throw new Error(`draft not sent: ${out.error}`);
-console.log(`draft ${out.id} (${out.kind}) is in Pub; reply /publish to it there, or /discard`);
+console.log(`${out.version ? `revision draft (v${out.version})` : `draft (${out.kind})`} ${out.id} is in Pub; reply /publish to it there, or /discard`);

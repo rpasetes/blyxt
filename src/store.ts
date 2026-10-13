@@ -10,7 +10,7 @@ export const getItem = (db: D1Database, id: string) =>
 
 export async function changelog(db: D1Database, id: string) {
   const { results } = await db
-    .prepare("SELECT item_id, version, kind, at, note, pinned FROM versions WHERE item_id = ? ORDER BY version")
+    .prepare("SELECT item_id, version, kind, at, note, pinned, note_generated FROM versions WHERE item_id = ? ORDER BY version")
     .bind(id)
     .all<Version>();
   return results;
@@ -73,7 +73,7 @@ export async function publishNew(db: D1Database, kind: AuthoredKind, c: Content,
 }
 
 // the next version of an item; the WHERE version guard and the versions primary key make a racing publish fail whole
-async function bump(db: D1Database, item: Item, kind: Kind, c: Content, note: string | null) {
+async function bump(db: D1Database, item: Item, kind: Kind, c: Content, note: string | null, noteGenerated = false) {
   const at = now();
   const next: Item = {
     ...item,
@@ -90,8 +90,8 @@ async function bump(db: D1Database, item: Item, kind: Kind, c: Content, note: st
   await db.batch([
     db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ?, transclusions = ?, generated = ? WHERE id = ? AND version = ?")
       .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, item.id, item.version),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash, transclusions, generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, next.version, next.kind, at, note, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, note_generated, content_md, content_html, content_hash, transclusions, generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, next.version, next.kind, at, note, note && noteGenerated ? 1 : 0, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated),
   ]);
   return next;
 }
@@ -102,6 +102,13 @@ export async function publishEdit(db: D1Database, id: string, c: Content) {
   const item = await getItem(db, id);
   if (!item || item.kind === "withdrawn" || item.content_md === c.md) return null;
   return bump(db, item, item.kind, c, null);
+}
+
+// a revision draft's publish: the next version, with a note; null when the post is withdrawn or moved past base
+export async function revise(db: D1Database, id: string, base: number, c: Content, note: string | null, noteGenerated: boolean) {
+  const item = await getItem(db, id);
+  if (!item || item.kind === "withdrawn" || item.version !== base) return null;
+  return bump(db, item, item.kind, c, note, noteGenerated);
 }
 
 // the endcap (§9): a version bump with the content emptied; the page and changelog stay

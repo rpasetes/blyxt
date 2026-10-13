@@ -1,7 +1,8 @@
 // Drafts from other clients: POST /api/drafts puts a draft in Pub, and only the owner's /publish there
 // makes it an item. Telegram stays the point of publish; a leaked token can only propose.
-import { directives, FRAGMENT_CAP, ID_RE, newId, now, overCap, type Generated, type Site } from "./blyg";
+import { directives, FRAGMENT_CAP, ID_RE, newId, now, overCap, pagePath, type Generated, type Item, type Site } from "./blyg";
 import { compose } from "./compose";
+import { getItem } from "./store";
 import { tg, type Config } from "./telegram";
 import { toTelegramHtml } from "./tghtml";
 
@@ -13,10 +14,16 @@ export type Draft = {
   chat_id: number;
   message_id: number | null;
   file_message_id: number | null;
+  // a revision draft: the post it revises, the version it was written against, and its changelog note
+  item_id: string | null;
+  base_version: number | null;
+  note: string | null;
+  note_generated: number;
 };
 
 const MAX_DRAFT = 100_000;
 const PREVIEW = 3000;
+const MAX_NOTE = 500;
 
 export const draftForMessage = (db: D1Database, chatId: number, messageId: number) =>
   db.prepare("SELECT * FROM drafts WHERE chat_id = ? AND (message_id = ? OR file_message_id = ?)").bind(chatId, messageId, messageId).first<Draft>();
@@ -58,10 +65,12 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
   if (req.method !== "POST") return new Response("method not allowed\n", { status: 405 });
   if (!authorized(req, token)) return fail(401, "unauthorized");
 
-  const body = (await req.json().catch(() => null)) as { content_md?: unknown; generated?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as { content_md?: unknown; generated?: unknown; update?: unknown; note?: unknown; note_generated?: unknown } | null;
   const md = typeof body?.content_md === "string" ? body.content_md.trim() : "";
   if (!md) return fail(400, "content_md is required");
   if ([...md].length > MAX_DRAFT) return fail(400, `drafts stay within ${MAX_DRAFT.toLocaleString("en")} characters`);
+  const note = typeof body!.note === "string" && body!.note.trim() ? body!.note.trim() : null;
+  if (note && [...note].length > MAX_NOTE) return fail(400, `notes stay within ${MAX_NOTE} characters`);
 
   let generated: Generated | undefined;
   if (body!.generated !== undefined) {
@@ -72,34 +81,83 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
     if (directives(md).length) return fail(400, "a generated draft can't quote yet: blyxt marks the whole body as generated");
   }
 
-  const composed = await compose(db, site.origin, md);
+  // a revision draft names the post it revises, by id or page link; it keeps that post's kind
+  let item: Item | null = null;
+  if (body!.update !== undefined) {
+    const id = typeof body!.update === "string" ? body!.update.match(/([0-9a-z]{26})\/?$/)?.[1] : undefined;
+    item = id && ID_RE.test(id) ? await getItem(db, id) : null;
+    if (!item) return fail(404, "update names no post on this blyg");
+    if (item.kind === "withdrawn") return fail(409, "that post is withdrawn: /republish it in Pub first");
+    if (item.content_md === md) return fail(400, "the revision doesn't change the post");
+    if (item.authored_kind === "fragment" && overCap(md)) return fail(400, `fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters`);
+  } else if (note) return fail(400, "a note describes a revision; a new post has none");
+
+  const composed = await compose(db, site.origin, md, item?.id);
   if (!composed.ok) return fail(422, composed.error);
-  const kind = composed.thread || overCap(md) ? "thread" : "fragment";
+  if (composed.thread && item?.authored_kind === "fragment") return fail(400, "a fragment can't quote");
+  const kind = item ? item.authored_kind : composed.thread || overCap(md) ? "thread" : "fragment";
 
-  const draft: Draft = { id: newId(), content_md: md, generated: generated ? JSON.stringify([generated]) : null, created: now(), chat_id: cfg.chatId, message_id: null, file_message_id: null };
-  await db.prepare("INSERT INTO drafts (id, content_md, generated, created, chat_id) VALUES (?, ?, ?, ?, ?)")
-    .bind(draft.id, draft.content_md, draft.generated, draft.created, draft.chat_id).run();
+  const draft: Draft = {
+    id: newId(), content_md: md, generated: generated ? JSON.stringify([generated]) : null, created: now(), chat_id: cfg.chatId, message_id: null, file_message_id: null,
+    item_id: item?.id ?? null, base_version: item?.version ?? null, note, note_generated: note && body!.note_generated === true ? 1 : 0,
+  };
+  await db.prepare("INSERT INTO drafts (id, content_md, generated, created, chat_id, item_id, base_version, note, note_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(draft.id, draft.content_md, draft.generated, draft.created, draft.chat_id, draft.item_id, draft.base_version, draft.note, draft.note_generated).run();
 
-  const preview = await previewDraft(cfg, site, md, composed.html, kind, generated);
+  const chars = [...md].length;
+  const head = item
+    ? [
+        `📝 <b>revision draft</b> · v${item.version} → v${item.version + 1} of ${esc(site.origin + pagePath(item))}`,
+        note ? `note${draft.note_generated ? " (written by the client)" : ""}: <i>${esc(note)}</i>` : "no note",
+        `changes: ${changes(item.content_md, md)}`,
+      ]
+    : [`📝 <b>draft</b> · ${kind}${kind === "thread" && chars > FRAGMENT_CAP ? ` (over ${FRAGMENT_CAP.toLocaleString("en")} characters)` : ""} · ${chars.toLocaleString("en")} characters`];
+  if (generated) head.push(`generated${generated.model ? ` by ${esc(generated.model)}` : ""}: it publishes marked as machine-generated`);
+  // a revision's preview replies to the post's latest message in Pub, so a post's drafts chain under it
+  const under = item && (await db.prepare("SELECT message_id FROM tg_messages WHERE item_id = ? AND chat_id = ? ORDER BY message_id DESC LIMIT 1").bind(item.id, cfg.chatId).first<{ message_id: number }>());
+
+  const preview = await previewDraft(cfg, site, md, composed.html, head.join("\n"), under?.message_id);
   if (!preview) {
     await deleteDraft(db, draft.id);
     return fail(502, "couldn't post the draft to Pub");
   }
   await db.prepare("UPDATE drafts SET message_id = ?, file_message_id = ? WHERE id = ?").bind(preview.messageId, preview.fileMessageId, draft.id).run();
-  return Response.json({ id: draft.id, kind, message_id: preview.messageId }, { status: 201 });
+  return Response.json({ id: draft.id, kind, message_id: preview.messageId, ...(item ? { update: item.id, version: item.version + 1 } : {}) }, { status: 201 });
 }
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+// what a revision changes, for the owner's eyes in Pub only: sections by heading, and length.
+// (never published: a changelog note must not reproduce withheld text, §5.2)
+export function changes(before: string, after: string) {
+  const sections = (md: string) => {
+    const out = new Map<string, string>();
+    let name = "(opening)";
+    for (const line of md.split("\n")) {
+      const h = line.match(/^#{1,6}\s+(.*)$/);
+      if (h) { name = h[1].trim(); out.set(name, out.get(name) ?? ""); continue; }
+      out.set(name, (out.get(name) ?? "") + line.trim() + "\n");
+    }
+    for (const [k, v] of out) out.set(k, v.trim());
+    return out;
+  };
+  const a = sections(before), b = sections(after);
+  const changed = [...b.keys()].filter((k) => a.has(k) && a.get(k) !== b.get(k));
+  const added = [...b.keys()].filter((k) => !a.has(k));
+  const removed = [...a.keys()].filter((k) => !b.has(k));
+  const delta = [...after].length - [...before].length;
+  const parts = [
+    ...(changed.length ? [`edited ${changed.map(esc).join(", ")}`] : []),
+    ...(added.length ? [`added ${added.map(esc).join(", ")}`] : []),
+    ...(removed.length ? [`removed ${removed.map(esc).join(", ")}`] : []),
+  ];
+  return `${parts.join("; ") || "wording only"} (${delta >= 0 ? "+" : "−"}${Math.abs(delta).toLocaleString("en")} characters)`;
+}
+
 // the draft as it would read, in Pub; a preview cut short comes with the whole markdown as a file
-async function previewDraft(cfg: Config, site: Site, md: string, html: string, kind: string, generated?: Generated) {
+async function previewDraft(cfg: Config, site: Site, md: string, html: string, head: string, replyTo?: number) {
   const body = toTelegramHtml(html, site.origin, PREVIEW);
   const cut = body !== toTelegramHtml(html, site.origin, Infinity);
-  const chars = [...md].length;
-  const head = [
-    `📝 <b>draft</b> · ${kind}${kind === "thread" && chars > FRAGMENT_CAP ? ` (over ${FRAGMENT_CAP.toLocaleString("en")} characters)` : ""} · ${chars.toLocaleString("en")} characters`,
-    ...(generated ? [`generated${generated.model ? ` by ${esc(generated.model)}` : ""}: it publishes marked as machine-generated`] : []),
-  ].join("\n");
   const text = `${head}\n\n${body}\n\n<i>reply /publish to publish it, or /discard to drop it${cut ? ". the preview is cut short; the whole draft is attached" : ""}</i>`;
   const sent = await tg(cfg.token, "sendMessage", {
     chat_id: cfg.chatId,
@@ -107,6 +165,7 @@ async function previewDraft(cfg: Config, site: Site, md: string, html: string, k
     text,
     parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
+    ...(replyTo ? { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } } : {}),
   });
   if (!sent.ok) return null;
   const messageId = (sent.result as { message_id: number }).message_id;

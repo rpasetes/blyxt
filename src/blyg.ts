@@ -51,6 +51,8 @@ export type Version = {
   at: string;
   note: string | null;
   pinned: number;
+  // the client wrote the note, not the author (§5.2)
+  note_generated?: number;
 };
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -234,6 +236,7 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
       at: c.at,
       note: c.note,
       ...(c.pinned ? { pinned: true } : {}),
+      ...(c.note && c.note_generated ? { generated: true } : {}),
     })),
   };
 }
