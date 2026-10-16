@@ -2,6 +2,7 @@
 import { contentHash, ID_RE, now } from "./blyg";
 import { USER_AGENT, type Manifest } from "./resolve";
 import { parseFeed, syntheticId, type LegacyEntry } from "./rss";
+import { sanitize } from "./sanitize";
 import { toTelegramHtml } from "./tghtml";
 import { tg } from "./telegram";
 
@@ -34,7 +35,7 @@ type Imported = {
   replied_at?: string | null;
 };
 type IndexEntry = { id: string; kind: string; created?: string; version: number };
-type ItemDoc = { id: string; kind: string; version: number; content_md?: string; content_html?: string; content_hash?: string; page?: string };
+type ItemDoc = { id: string; kind: string; version: number; content_md?: string; content_html?: string; content_hash?: string; page?: string; author?: { name?: string } };
 
 export type Bot = { token: string; chatId: number };
 // one Sub topic: a grouping of followed blygs
@@ -306,12 +307,25 @@ async function applyDoc(db: D1Database, bot: Bot, s: Subscription, doc: ItemDoc,
       await discrepancy(db, bot, s, stealthy, seen, doc, "stealth", doc.content_hash!,
         `⚠ ${s.title} changed this post without a new version (still v${doc.version}). blyxt shows the new text; the change should have been v${doc.version + 1}.`);
     }
+    if (doc.version >= highest) await saveSnapshot(db, s.origin, doc);
     await db.prepare("UPDATE imported SET checked_at = ? WHERE origin = ? AND item_id = ?").bind(now(), s.origin, doc.id).run();
     return pending ? "pending" : "done";
   } catch (e) {
     if (e instanceof Retry) return "retry";
     throw e;
   }
+}
+
+// what quoting bakes (§10.2): the document as read, its HTML made safe for this blyg's pages.
+// A withdrawn item keeps no content: nothing was pin-retained, so it can't be quoted (§13.4)
+export async function saveSnapshot(db: D1Database, origin: string, doc: ItemDoc) {
+  if (!ID_RE.test(doc.id)) return;
+  const html = doc.kind === "withdrawn" ? "" : sanitize(doc.content_html ?? "", origin);
+  await db.prepare(
+    `INSERT INTO snapshots (origin, item_id, version, kind, content_html, page, author, fetched) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (origin, item_id) DO UPDATE SET version = excluded.version, kind = excluded.kind, content_html = excluded.content_html,
+       page = excluded.page, author = excluded.author, fetched = excluded.fetched WHERE excluded.version >= snapshots.version`,
+  ).bind(origin, doc.id, doc.version, doc.kind, html, doc.page ?? null, doc.author?.name ?? null, now()).run();
 }
 
 // a notice to every topic following a blyg
