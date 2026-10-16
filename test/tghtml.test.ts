@@ -30,3 +30,13 @@ test("truncation counts visible text and closes open tags", () => {
 test("code blocks keep their whitespace", () => {
   expect(toTelegramHtml("<pre><code>a  &lt;b&gt;\n  c</code></pre>", base)).toBe("<pre>a  &lt;b&gt;\n  c</pre>");
 });
+
+test("a baked quote is followed by a link to what it quotes; nested quotes fold into the outer one's", () => {
+  const html = '<p>mine</p>\n<blockquote class="blyg-transclusion" data-blyg-id="abc" data-blyg-version="2" data-blyg-origin="https://them.example/blyg/"><p>theirs</p><blockquote class="blyg-transclusion" data-blyg-id="def" data-blyg-version="1"><p>deeper</p></blockquote></blockquote>\n<p>after</p>';
+  const seen: unknown[] = [];
+  const out = toTelegramHtml(html, "https://me.example/blyg/", 3500, (q) => (seen.push(q), { url: `${q.origin}t/${q.id}/`, label: "Them & co" }));
+  expect(out).toBe('mine\n\n<blockquote>theirs\n\ndeeper</blockquote>\n↳ <a href="https://them.example/blyg/t/abc/">Them &amp; co</a>\n\nafter');
+  expect(seen).toEqual([{ id: "abc", version: 2, origin: "https://them.example/blyg/" }]);
+  // without a resolver, nothing changes
+  expect(toTelegramHtml(html, "https://me.example/blyg/")).toBe("mine\n\n<blockquote>theirs\n\ndeeper</blockquote>\n\nafter");
+});

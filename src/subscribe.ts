@@ -3,7 +3,7 @@ import { contentHash, ID_RE, now } from "./blyg";
 import { USER_AGENT, type Manifest } from "./resolve";
 import { parseFeed, syntheticId, type LegacyEntry } from "./rss";
 import { sanitize } from "./sanitize";
-import { toTelegramHtml } from "./tghtml";
+import { decode, toTelegramHtml, type QuoteLink } from "./tghtml";
 import { tg } from "./telegram";
 
 export type Subscription = {
@@ -194,11 +194,33 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 // Sub messages show the rendered item (content_html), so baked quotes read as quotes, not ![[id]] directives
-export function messageText(title: string, origin: string, doc: ItemDoc) {
+export function messageText(title: string, origin: string, doc: ItemDoc, quoteLinks?: Map<string, QuoteLink>) {
   if (doc.kind === "withdrawn") return `<b>${esc(title)}</b> · withdrawn`;
   const link = new URL(doc.page ?? `${doc.kind === "thread" ? "t" : "f"}/${doc.id}/`, origin).href;
-  const body = toTelegramHtml(doc.content_html ?? "", origin, MAX_MESSAGE);
+  const body = toTelegramHtml(doc.content_html ?? "", origin, MAX_MESSAGE, quoteLinks && ((q) => quoteLinks.get(`${q.origin} ${q.id}`) ?? null));
   return `<b>${esc(title)}</b>${doc.version > 1 ? ` · v${doc.version}` : ""}\n\n${body}\n\n<a href="${esc(link)}">${esc(link)}</a>`;
+}
+
+// each quote baked into a post links to what it quotes, like a citation under it: the page as blyxt last read it,
+// else the reference convention for a kind it knows, else the item document, which every blyg serves
+export async function quoteLinks(db: D1Database, html: string, origin: string) {
+  const links = new Map<string, QuoteLink>();
+  for (const [tag] of html.matchAll(/<blockquote\b[^>]*\bdata-blyg-id="[^"]*"[^>]*>/g)) {
+    const id = tag.match(/data-blyg-id="([^"]*)"/)![1];
+    const from = decode(tag.match(/data-blyg-origin="([^"]*)"/)?.[1] ?? "") || origin;
+    const key = `${from} ${id}`;
+    if (links.has(key) || !ID_RE.test(id)) continue;
+    const known = await db.prepare(
+      `SELECT (SELECT title FROM subscriptions WHERE origin = ?1) AS title,
+              (SELECT page FROM snapshots WHERE origin = ?1 AND item_id = ?2) AS page,
+              (SELECT kind FROM imported WHERE origin = ?1 AND item_id = ?2 AND kind != 'withdrawn' LIMIT 1) AS kind`,
+    ).bind(from, id).first<{ title: string | null; page: string | null; kind: string | null }>();
+    const path = known?.page ?? (known?.kind ? `${known.kind === "thread" ? "t" : "f"}/${id}/` : `items/${id}.json`);
+    let url: string;
+    try { url = new URL(path, from).href; } catch { continue; }
+    links.set(key, { url, label: known?.title ?? new URL(from).host });
+  }
+  return links;
 }
 
 // Telegram said "later" (rate limit, outage): the item stays unapplied and the next poll retries it
@@ -223,7 +245,8 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
 // Show a document in the Sub topic: a new message for a new item, an edit for a later version.
 // Edits don't move a message, so a later version of an older post also gets a reply under it,
 // and a burst of versions keeps editing that one reply while it's fresh.
-async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined, text = messageText(s.title, s.origin, doc)) {
+async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined, text?: string) {
+  text ??= messageText(s.title, s.origin, doc, await quoteLinks(db, doc.content_html ?? "", s.origin));
   let messageId = row?.tg_message_id ?? null;
   let postedAt = row?.posted_at ?? null;
   let replyId = row?.reply_message_id ?? null;

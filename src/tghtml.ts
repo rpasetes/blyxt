@@ -14,7 +14,11 @@ export const decode = (s: string) =>
 const escape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const attr = (tag: string, name: string) => decode(tag.match(new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, "i"))?.[1] ?? "");
 
-export function toTelegramHtml(html: string, base: string, limit = 3500) {
+// where a baked quote's "↳" line under it points: the quoted post's page and a label for it
+export type QuoteLink = { url: string; label: string };
+export type QuoteLinks = (q: { id: string; version: number; origin: string }) => QuoteLink | null;
+
+export function toTelegramHtml(html: string, base: string, limit = 3500, quoteLink?: QuoteLinks) {
   let out = "";
   let length = 0; // visible characters, as Telegram counts them
   let truncated = false;
@@ -22,6 +26,8 @@ export function toTelegramHtml(html: string, base: string, limit = 3500) {
   let pre = false;
   const open: string[] = []; // emitted Telegram tags, innermost last
   const listCounters: (number | null)[] = [];
+  // the outermost quote's link, emitted when it closes (inner quotes fold into it, so theirs don't show)
+  let quoteAfter: QuoteLink | null = null;
 
   // line breaks are deferred so they land before the next tag or text, never inside an empty element
   let pending = 0;
@@ -72,7 +78,13 @@ export function toTelegramHtml(html: string, base: string, limit = 3500) {
       else if (tag === "ul" || tag === "ol") listCounters.push(tag === "ol" ? 1 : null);
       else if (tag === "li") { const n = listCounters.at(-1); text(n == null ? "• " : `${n}. `); if (n != null) listCounters[listCounters.length - 1] = n + 1; }
       // Telegram allows one quote level; inner quotes (nested transclusions) fold into it
-      else if (tag === "blockquote") { if (quoteDepth++ === 0) push("blockquote"); }
+      else if (tag === "blockquote") {
+        if (quoteDepth++ === 0) {
+          push("blockquote");
+          const id = attr(rest, "data-blyg-id");
+          quoteAfter = id && quoteLink ? quoteLink({ id, version: Number(attr(rest, "data-blyg-version")), origin: attr(rest, "data-blyg-origin") || base }) : null;
+        }
+      }
       else if (tag === "pre") { pre = true; push("pre"); }
       else if (tag === "a") {
         const href = attr(rest, "href");
@@ -81,7 +93,21 @@ export function toTelegramHtml(html: string, base: string, limit = 3500) {
     } else {
       if (/^h[1-6]$/.test(tag)) pop("b");
       else if (tag === "ul" || tag === "ol") listCounters.pop();
-      else if (tag === "blockquote") { if (--quoteDepth === 0) pop("blockquote"); }
+      else if (tag === "blockquote") {
+        if (--quoteDepth === 0) {
+          pop("blockquote");
+          if (quoteAfter) {
+            const link = quoteAfter;
+            quoteAfter = null;
+            // straight under the quote: a break left pending inside it would open a gap
+            pending = 1;
+            text("↳ ");
+            push("a", `<a href="${escape(link.url)}">`);
+            text(link.label);
+            pop("a");
+          }
+        }
+      }
       else if (tag === "pre") { pre = false; pop("pre"); }
       else if (tg && !(tag === "code" && pre)) pop(tg);
       if (BLOCK.has(tag)) newline(tag === "li" ? 1 : 2);
