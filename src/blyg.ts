@@ -27,7 +27,14 @@ export type Item = {
   transclusions?: string | null;
   // JSON of the generated[] entries this version disclosed, or null (§5.7)
   generated?: string | null;
+  // threads only: JSON of the stub_of reference this version responds to, or null (§10.6)
+  stub_of?: string | null;
 };
+
+// the human half of a citation, frozen when the reference was made (§5.9)
+export type Cited = { source?: string; author?: string; excerpt?: string; url?: string; retrieved: string };
+// a stub's one target (§10.6): origin always, even our own, because a citation is absolute
+export type StubOf = { origin: string; id: string; version: number; cited?: Cited };
 
 // one machine-generated span's provenance (§5.7): own-origin sources at 0.3, never instruction text
 export type Generated = {
@@ -93,7 +100,7 @@ type LinkToken = { type: "blygLink"; raw: string; id: string; live: boolean };
 type DirectiveToken = { type: "blygDirective"; raw: string; id: string; versioned: boolean; detached: boolean; live?: boolean; selection?: string };
 export type LinkTarget = { url: string; label: string };
 // what a directive bakes: the source's html at the version the publisher holds (§10.2)
-export type Snapshot = { version: number; html: string; origin?: string };
+export type Snapshot = { version: number; html: string; origin?: string; cited?: Cited };
 type Context = { links: Map<string, LinkTarget>; quotes: Map<string, Snapshot> };
 
 // set synchronously around each parse, so concurrent requests never see each other's context
@@ -200,7 +207,7 @@ export function excerpt(md: string, n = 80) {
 export function manifest(site: Site, updated: string) {
   return {
     blyg: "0.3",
-    level: 1,
+    level: 2,
     generator: "blyxt/0.1.0",
     generator_url: "https://github.com/rpasetes/blyxt",
     site: site.origin,
@@ -229,6 +236,8 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
     media: [],
     // threads always carry it, a withdrawn thread's endcap as []; fragments omit it (§10.3)
     ...(item.authored_kind === "thread" ? { transclusions: item.kind === "withdrawn" ? [] : JSON.parse(item.transclusions ?? "[]") } : {}),
+    // a withdrawn stub's endcap omits it, which is what stops it verifying as a stub (§10.6)
+    ...(item.stub_of && item.kind !== "withdrawn" ? { stub_of: JSON.parse(item.stub_of) } : {}),
     // omitted when the version involved no generation; an endcap never carries it (§5.7)
     ...(item.generated && item.kind !== "withdrawn" ? { generated: JSON.parse(item.generated) } : {}),
     changelog: changelog.map((c) => ({
@@ -242,7 +251,7 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
 }
 
 // items/{id}/v{n}.json: one pinned version, frozen (§8)
-export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions" | "generated">) {
+export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions" | "generated" | "stub_of">) {
   return {
     blyg: "0.3",
     id: v.item_id,
@@ -257,6 +266,8 @@ export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" 
     content_html: absolutize(v.content_html, site.origin),
     content_hash: v.content_hash,
     ...(v.kind === "thread" ? { transclusions: JSON.parse(v.transclusions ?? "[]") } : {}),
+    // a pin carries its own citations (§8)
+    ...(v.stub_of ? { stub_of: JSON.parse(v.stub_of) } : {}),
     // a citation includes its provenance (§5.7)
     ...(v.generated ? { generated: JSON.parse(v.generated) } : {}),
   };
@@ -296,7 +307,7 @@ export function feed(site: Site, events: Version[], latest: Map<string, Item>, u
     <link>${esc(site.origin)}</link>
     <description>${esc(site.subtitle)}</description>
     <lastBuildDate>${rfc822(updated)}</lastBuildDate>
-    <blyg:level>1</blyg:level>
+    <blyg:level>2</blyg:level>
     <blyg:manifest>${esc(site.origin)}blyg.json</blyg:manifest>
 ${entries.join("\n")}
   </channel>
@@ -339,6 +350,15 @@ ${body}
 const pinCitations = (site: Site, item: Item, pins: number[]) =>
   pins.length ? ` · pinned: ${pins.map((n) => `<a href="${esc(site.origin + pagePath(item))}v${n}/">v${n}</a>`).join(", ")}` : "";
 
+// a stub's page names what it responds to; presentation from stub_of.cited, never part of content_html (§5.9)
+function respondsTo(item: Item) {
+  if (!item.stub_of) return "";
+  const stub = JSON.parse(item.stub_of) as StubOf;
+  const url = stub.cited?.url ?? `${stub.origin}items/${stub.id}.json`;
+  const label = stub.cited?.source ?? new URL(stub.origin).host;
+  return `<p class="meta">in response to <a href="${esc(url)}">${esc(label)}</a> · v${stub.version}</p>\n`;
+}
+
 export function itemPage(site: Site, item: Item, pins: number[] = []) {
   const url = site.origin + pagePath(item);
   const desc = esc(excerpt(item.content_md, 200));
@@ -350,7 +370,7 @@ export function itemPage(site: Site, item: Item, pins: number[] = []) {
   <meta name="description" content="${desc}">`;
   const body = item.kind === "withdrawn"
     ? `<p class="meta">withdrawn · v${item.version}${pinCitations(site, item, pins)}</p>`
-    : `<article>${item.content_html}<p class="meta">${item.kind} · v${item.version} · ${item.updated}${pinCitations(site, item, pins)}</p></article>`;
+    : `<article>${respondsTo(item)}${item.content_html}<p class="meta">${item.kind} · v${item.version} · ${item.updated}${pinCitations(site, item, pins)}</p></article>`;
   return layout(site, excerpt(item.content_md, 60) || site.title, head, `<p class="meta"><a href="${esc(site.origin)}">${esc(site.title)}</a></p>\n${body}`);
 }
 

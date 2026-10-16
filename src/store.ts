@@ -1,4 +1,4 @@
-import { contentHash, generatedBlock, newId, now, type AuthoredKind, type Generated, type Item, type Kind, type Transclusion, type Version } from "./blyg";
+import { contentHash, generatedBlock, newId, now, type AuthoredKind, type Generated, type Item, type Kind, type StubOf, type Transclusion, type Version } from "./blyg";
 
 export async function listItems(db: D1Database) {
   const { results } = await db.prepare("SELECT * FROM items ORDER BY updated DESC, id").all<Item>();
@@ -36,11 +36,19 @@ export const itemForMessage = (db: D1Database, chatId: number, messageId: number
 
 // what a publish event says; html and transclusions come from compose(), which resolves and bakes;
 // generated is the provenance of a machine-generated body (§5.7)
-export type Content = { md: string; html: string; transclusions: Transclusion[]; generated?: Generated[] };
+export type Content = { md: string; html: string; transclusions: Transclusion[]; generated?: Generated[]; stubOf?: StubOf };
 const EMPTY: Content = { md: "", html: "", transclusions: [] };
 
 // threads record their transclusions on every version; fragments never carry the key (§10.3)
 const transclusionsOf = (kind: AuthoredKind, c: Content) => (kind === "thread" ? JSON.stringify(c.transclusions) : null);
+// version agreement (§10.6): when the body quotes the stub's target, stub_of names the version baked
+// (an own-origin quote carries no origin, so it matches by id)
+function stubJson(stub: StubOf | null | undefined, c: Content) {
+  if (!stub) return null;
+  const baked = c.transclusions.find((t) => t.id === stub.id && (!t.origin || t.origin === stub.origin));
+  return JSON.stringify(baked ? { ...stub, version: baked.version } : stub);
+}
+
 const generatedOf = (c: Content) => (c.generated?.length ? JSON.stringify(c.generated) : null);
 // a generated body is marked in content_html too (§5.7)
 const htmlOf = (c: Content) => (c.generated?.length ? generatedBlock(c.html) : c.html);
@@ -60,12 +68,13 @@ export async function publishNew(db: D1Database, kind: AuthoredKind, c: Content,
     content_hash: await contentHash(c.md),
     transclusions: transclusionsOf(kind, c),
     generated: generatedOf(c),
+    stub_of: kind === "thread" && c.stubOf ? stubJson(c.stubOf, c) : null,
   };
   await db.batch([
-    db.prepare("INSERT INTO items (id, kind, authored_kind, created, updated, version, content_md, content_html, content_hash, transclusions, generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, item.kind, item.authored_kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash, transclusions, generated) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)")
-      .bind(item.id, 1, item.kind, at, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated),
+    db.prepare("INSERT INTO items (id, kind, authored_kind, created, updated, version, content_md, content_html, content_hash, transclusions, generated, stub_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, item.kind, item.authored_kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated, item.stub_of),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash, transclusions, generated, stub_of) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, 1, item.kind, at, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated, item.stub_of),
     db.prepare("INSERT INTO tg_messages (chat_id, message_id, item_id, prefix) VALUES (?, ?, ?, ?)")
       .bind(source.chatId, source.messageId, item.id, source.prefix ?? null),
   ]);
@@ -75,6 +84,8 @@ export async function publishNew(db: D1Database, kind: AuthoredKind, c: Content,
 // the next version of an item; the WHERE version guard and the versions primary key make a racing publish fail whole
 async function bump(db: D1Database, item: Item, kind: Kind, c: Content, note: string | null, noteGenerated = false) {
   const at = now();
+  // a stub stays one: set at creation, kept through edits, omitted by the endcap and restored by a republish (§10.6)
+  const stub = kind === "withdrawn" ? null : c.stubOf ?? (item.stub_of ? (JSON.parse(item.stub_of) as StubOf) : await lastStub(db, item.id));
   const next: Item = {
     ...item,
     kind,
@@ -86,14 +97,21 @@ async function bump(db: D1Database, item: Item, kind: Kind, c: Content, note: st
     // a withdrawn thread's endcap carries [] (§9)
     transclusions: transclusionsOf(item.authored_kind, c),
     generated: generatedOf(c),
+    stub_of: stub ? stubJson(stub, c) : null,
   };
   await db.batch([
-    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ?, transclusions = ?, generated = ? WHERE id = ? AND version = ?")
-      .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, item.id, item.version),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, note_generated, content_md, content_html, content_hash, transclusions, generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, next.version, next.kind, at, note, note && noteGenerated ? 1 : 0, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated),
+    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ?, transclusions = ?, generated = ?, stub_of = ? WHERE id = ? AND version = ?")
+      .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, next.stub_of, item.id, item.version),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, note_generated, content_md, content_html, content_hash, transclusions, generated, stub_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, next.version, next.kind, at, note, note && noteGenerated ? 1 : 0, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, next.stub_of),
   ]);
   return next;
+}
+
+// the stub_of a withdrawn item last carried, so a republish is still the stub it was
+export async function lastStub(db: D1Database, id: string) {
+  const row = await db.prepare("SELECT stub_of FROM versions WHERE item_id = ? AND stub_of IS NOT NULL ORDER BY version DESC LIMIT 1").bind(id).first<{ stub_of: string }>();
+  return row ? (JSON.parse(row.stub_of) as StubOf) : null;
 }
 
 // next version of a published item; null when the text didn't change or the item is withdrawn
@@ -130,7 +148,7 @@ export async function republish(db: D1Database, id: string, c: Content, note: st
   return bump(db, item, item.authored_kind, c, note);
 }
 
-export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string; transclusions: string | null; generated: string | null };
+export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string; transclusions: string | null; generated: string | null; stub_of: string | null };
 
 // a pinned version's content, or null: unpinned history is never served (§8)
 export const getPinned = (db: D1Database, id: string, version: number) =>

@@ -1,8 +1,9 @@
 // Telegram webhook: Pub topic publishes, Sub topics manage subscriptions.
 // Bot API: https://core.telegram.org/bots/api
-import { FRAGMENT_CAP, ID_RE, overCap, pagePath, type Site } from "./blyg";
+import { FRAGMENT_CAP, ID_RE, overCap, pagePath, type Site, type StubOf } from "./blyg";
 import { compose } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
+import { mention } from "./mentions";
 import { resolve } from "./resolve";
 import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, revise, withdraw } from "./store";
 import {
@@ -25,6 +26,8 @@ export type TgMessage = {
   chat: { id: number };
   text?: string;
   reply_to_message?: TgMessage;
+  // a reply to a message in another chat or forum topic: in Pub, to a followed post in Sub
+  external_reply?: { message_id?: number; chat?: { id: number } };
   // the part of the replied-to message the user selected, if any
   quote?: { text: string };
   pinned_message?: TgMessage;
@@ -86,24 +89,64 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   // Telegram retries webhooks; a message publishes at most once
   if (await itemForMessage(db, m.chat.id, m.message_id)) return null;
 
-  const prefix = await quotePrefix(db, m);
-  const md = (prefix ?? "") + m.text.trim();
+  const prefix = (await quotePrefix(db, m)) ?? (await linkPrefix(db, site, m));
+  const md = (prefix?.md ?? "") + (prefix?.rest ?? m.text).trim();
   const composed = await compose(db, site.origin, md);
   if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. fix it and send it again`);
+  // a stub is a response, and one with nothing to say is a misuse (§10.6)
+  if (composed.stub && !md.replace(/^!\[\[[^\]]*\]\]\n(?:>.*\n)*/, "").trim()) {
+    return () => reply(cfg, m, "not published: say something about it. a stub is a response, so it needs your words after the quote");
+  }
   // a message too long for a fragment becomes a thread, which has no cap
   const long = !composed.thread && overCap(md);
   const kind = composed.thread || long ? "thread" : "fragment";
-  const item = await publishNew(db, kind, { md, html: composed.html, transclusions: composed.transclusions }, { chatId: m.chat.id, messageId: m.message_id, prefix });
-  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${long ? ` (over ${FRAGMENT_CAP.toLocaleString("en")} characters)` : ""} → ${site.origin}${pagePath(item)}`);
+  const item = await publishNew(db, kind, { md, html: composed.html, transclusions: composed.transclusions, stubOf: composed.stub }, { chatId: m.chat.id, messageId: m.message_id, prefix: prefix?.md });
+  return async () => {
+    await mention(db, site, item);
+    await reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${long ? ` (over ${FRAGMENT_CAP.toLocaleString("en")} characters)` : ""}${await stubNote(db, composed.stub, site, item.id)} → ${site.origin}${pagePath(item)}`);
+  };
 }
 
-// replying in Pub to one of your posts quotes it: the reply becomes a thread that opens with ![[id]],
-// or with the part you selected as a partial quote (§10.1)
-async function quotePrefix(db: D1Database, m: TgMessage) {
-  const to = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
-  if (!to) return undefined;
+// "(stub of …)" when a thread responds to another blyg's post, and how telling that blyg went (§15.2)
+async function stubNote(db: D1Database, stub: StubOf | undefined, site: Site, itemId: string) {
+  if (!stub || stub.origin === site.origin) return "";
+  const row = await db.prepare("SELECT status FROM mentions_out WHERE item_id = ? AND relation = 'stub'").bind(itemId).first<{ status: string }>();
+  const told = { sent: "they've been told", pending: "telling them is retrying", failed: "their blyg refused the mention", "no-endpoint": "their blyg takes no mentions" }[row?.status ?? ""] ?? "not told";
+  return ` (stub of ${stub.cited?.source ?? new URL(stub.origin).host}; ${told})`;
+}
+
+// replying in Pub to one of your posts, or (from Pub) to a followed post in Sub, quotes it: the reply becomes a thread
+// that opens with ![[id]], or with the part you selected as a partial quote (§10.1), and so is a stub of it
+async function quotePrefix(db: D1Database, m: TgMessage): Promise<{ md: string; rest?: string } | undefined> {
+  // (in a topic every message replies to the topic's first message, so check both)
+  const external = m.external_reply && (!m.external_reply.chat || m.external_reply.chat.id === m.chat.id) ? m.external_reply.message_id : undefined;
+  let id: string | undefined;
+  for (const to of [m.reply_to_message?.message_id, external]) {
+    if (to) id ??= (await itemForMessage(db, m.chat.id, to))?.item_id ?? (await followedForMessage(db, to))?.item_id;
+  }
+  if (!id) return undefined;
   const quote = m.quote?.text.trim();
-  return `![[${to.item_id}]]\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n`;
+  return { md: `![[${id}]]\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n` };
+}
+
+// the followed post a Sub message shows (or a reply blyxt posted under it for a later version)
+const followedForMessage = (db: D1Database, messageId: number) =>
+  db.prepare("SELECT origin, item_id FROM imported WHERE tg_message_id = ?1 OR reply_message_id = ?1 LIMIT 1").bind(messageId).first<{ origin: string; item_id: string }>();
+
+// a message that opens with the link to a post (yours or a followed blyg's) quotes it like a reply would;
+// the rest of the message is what you say about it
+async function linkPrefix(db: D1Database, site: Site, m: TgMessage) {
+  const [first, ...rest] = m.text!.trim().split("\n");
+  const url = first.trim();
+  if (!/^https?:\/\/\S+$/.test(url)) return undefined;
+  const { results } = await db.prepare("SELECT origin FROM subscriptions WHERE legacy = 0").all<{ origin: string }>();
+  for (const origin of [site.origin, ...results.map((r) => r.origin)]) {
+    if (!url.startsWith(origin)) continue;
+    const id = url.slice(origin.length).match(/^(?:[ft]\/([0-9a-z]{26})\/?(?:v\d+\/?)?|items\/([0-9a-z]{26})\.json)(?:[?#].*)?$/);
+    const found = id?.[1] ?? id?.[2];
+    if (found && ID_RE.test(found)) return { md: `![[${found}]]\n\n`, rest: rest.join("\n") };
+  }
+  return undefined;
 }
 
 // editing a published message publishes its next version
@@ -113,7 +156,9 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (!link) return null;
 
   // unchanged text (including Telegram retries) is not a new version
-  const md = (link.prefix ?? "") + m.text.trim();
+  // a message that opened with a link keeps its first line as the link: it rebuilds the same quote
+  const linked = link.prefix ? await linkPrefix(db, site, m) : undefined;
+  const md = linked ? linked.md + linked.rest.trim() : (link.prefix ?? "") + m.text.trim();
   const composed = await compose(db, site.origin, md, link.item_id);
   if (!composed.ok) return () => reply(cfg, m, `edit not published: ${composed.error}. the post keeps its current version`);
   // the kind is fixed when a post is first published: it decides the page's address
@@ -129,7 +174,10 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
     if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
     return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
   }
-  return () => reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
+  return async () => {
+    await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
+    await mention(db, site, item);
+  };
 }
 
 const PUB_USAGE = "reply to a published post with /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); reply to a draft with /publish or /discard";
@@ -156,7 +204,12 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
 
   const note = args.join(" ") || null;
   const item = await withdraw(db, id, note);
-  if (item) return () => reply(cfg, m, `withdrawn v${item.version} → ${site.origin}${pagePath(item)}\nits content is gone from the blyg, feed and followers' readers; the page stays as an endcap`);
+  if (item) {
+    return async () => {
+      await reply(cfg, m, `withdrawn v${item.version} → ${site.origin}${pagePath(item)}\nits content is gone from the blyg, feed and followers' readers; the page stays as an endcap`);
+      await mention(db, site, item);
+    };
+  }
   const existing = await getItem(db, id);
   if (!existing) return () => reply(cfg, m, `no post ${id} on this blyg`);
   return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
@@ -204,13 +257,19 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
       db.prepare("INSERT OR IGNORE INTO tg_messages (chat_id, message_id, item_id) VALUES (?, ?, ?)").bind(m.chat.id, draft.message_id, item.id),
       db.prepare("DELETE FROM drafts WHERE id = ?").bind(draft.id),
     ]);
-    return () => reply(cfg, m, `published v${item.version}${marked} → ${site.origin}${pagePath(item)}`);
+    return async () => {
+      await reply(cfg, m, `published v${item.version}${marked} → ${site.origin}${pagePath(item)}`);
+      await mention(db, site, item);
+    };
   }
   const long = !composed.thread && overCap(draft.content_md);
   const kind = composed.thread || long ? "thread" : "fragment";
-  const item = await publishNew(db, kind, { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, generated }, { chatId: m.chat.id, messageId: draft.message_id! });
+  const item = await publishNew(db, kind, { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, generated, stubOf: composed.stub }, { chatId: m.chat.id, messageId: draft.message_id! });
   await deleteDraft(db, draft.id);
-  return () => reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${marked} → ${site.origin}${pagePath(item)}`);
+  return async () => {
+    await mention(db, site, item);
+    await reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${marked}${await stubNote(db, composed.stub, site, item.id)} → ${site.origin}${pagePath(item)}`);
+  };
 }
 
 // a withdrawn post comes back as its next version: the replied-to message's text as it reads now,
@@ -232,7 +291,10 @@ async function handleRepublish(m: TgMessage, id: string, note: string | null, db
   const generated = last?.generated ? JSON.parse(last.generated) : undefined;
   const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions, generated }, note);
   if (!next) return null;
-  return () => reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);
+  return async () => {
+    await reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);
+    await mention(db, site, next);
+  };
 }
 
 // pinning in Telegram, or /pin [vN], pins a version forever (§8); Telegram doesn't report unpins, and pins can't be undone anyway

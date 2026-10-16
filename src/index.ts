@@ -1,5 +1,6 @@
 import type { Site } from "./blyg";
 import { handleDraftRequest } from "./drafts";
+import { deliverDue } from "./mentions";
 import { serveBlyg } from "./serve";
 import { pollDue } from "./subscribe";
 import { handleUpdate, type TgUpdate } from "./telegram";
@@ -61,8 +62,10 @@ export default {
     return serveBlyg(req, env.DB, siteOf(env), url.pathname.replace(/^\//, ""));
   },
 
-  // cron: poll followed blygs into the Sub topic
+  // cron: poll followed blygs into the Sub topic, and retry outbound mentions
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(pollDue(env.DB, { token: env.TELEGRAM_BOT_TOKEN, chatId: Number(env.TELEGRAM_CHAT_ID) }));
+    // mentions that failed earlier retry on their backoff (§15.2)
+    ctx.waitUntil(deliverDue(env.DB).catch((e) => console.error(`mentions: ${e}`)));
   },
 } satisfies ExportedHandler<Env>;

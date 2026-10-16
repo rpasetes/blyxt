@@ -1,9 +1,10 @@
 // Publish-time resolution of a message's markdown (§10.1–10.2): what it links and what it quotes.
-import { type AuthoredKind, directives, excerpt, linkIds, pagePath, render, textContent, type LinkTarget, type Snapshot, type Transclusion } from "./blyg";
+import { type AuthoredKind, directives, excerpt, linkIds, now, pagePath, render, textContent, type LinkTarget, type Snapshot, type StubOf, type Transclusion } from "./blyg";
 import { getItem } from "./store";
 
 export type Composed =
-  | { ok: true; html: string; thread: boolean; transclusions: Transclusion[] }
+  // stub: the post a thread responds to, when it opens with a quote of it (§10.6)
+  | { ok: true; html: string; thread: boolean; transclusions: Transclusion[]; stub?: StubOf }
   | { ok: false; error: string };
 
 // self: the thread being edited, which may not quote itself, directly or through other local threads
@@ -16,11 +17,11 @@ export async function compose(db: D1Database, origin: string, src: string, self?
   for (const d of found) {
     let snap = quotes.get(d.id);
     if (!snap) {
-      const resolved = await resolveQuote(db, d.id, self);
+      const resolved = await resolveQuote(db, origin, d.id, self);
       if (typeof resolved === "string") return { ok: false, error: resolved };
       quotes.set(d.id, (snap = resolved));
     }
-    const entry: Transclusion = { id: d.id, version: snap.version };
+    const entry: Transclusion = { id: d.id, version: snap.version, ...(snap.origin ? { origin: snap.origin } : {}) };
     if (d.selection !== undefined) {
       const selector = select(textContent(snap.html), d.selection);
       if (!selector) return { ok: false, error: `the quote under ![[${d.id}]] isn't word for word in that post (v${snap.version})` };
@@ -35,21 +36,50 @@ export async function compose(db: D1Database, origin: string, src: string, self?
     if (typeof target === "string") return { ok: false, error: target };
     links.set(id, target);
   }
-  return { ok: true, html: render(src, origin, links, quotes), thread: found.length > 0, transclusions };
+  // a thread that opens with a quote responds to it: blyxt's stub gesture is the quote itself
+  const first = found.length && /^!\[\[/.test(src.trimStart()) ? found[0] : undefined;
+  const target = first && quotes.get(first.id)!;
+  const stub = target ? { origin: target.origin ?? origin, id: first.id, version: target.version, ...(target.cited ? { cited: target.cited } : {}) } : undefined;
+  return { ok: true, html: render(src, origin, links, quotes), thread: found.length > 0, transclusions, ...(stub ? { stub } : {}) };
 }
 
-// the publisher's own current snapshot (§10.2). Quoting followed blygs needs their content stored, which comes with L2.
-async function resolveQuote(db: D1Database, id: string, self?: string): Promise<Snapshot | string> {
+// the publisher's own current snapshot (§10.2): a local post, else exactly one followed blyg's post as last read.
+// Never a live fetch: quoting follows reading
+async function resolveQuote(db: D1Database, origin: string, id: string, self?: string): Promise<Snapshot | string> {
   if (id === self) return "a thread can't quote itself";
   const local = await getItem(db, id);
   if (local && local.kind !== "withdrawn") {
     if (self && local.kind === "thread" && (await reaches(db, id, self))) return `![[${id}]] already quotes this thread, so quoting it back would loop`;
-    return { version: local.version, html: local.content_html };
+    return { version: local.version, html: local.content_html, cited: { url: origin + pagePath(local), excerpt: excerpt(local.content_md, 200), retrieved: now() } };
   }
   if (local) return `![[${id}]] is withdrawn`;
+
+  // L0 rows never match: their ids aren't blyg ids (§13.6)
+  const { results } = await db.prepare(
+    `SELECT s.origin, s.version, s.kind, s.content_html, s.page, s.author, s.fetched, sub.title
+     FROM snapshots s JOIN subscriptions sub ON sub.origin = s.origin AND sub.legacy = 0 WHERE s.item_id = ?`,
+  ).bind(id).all<{ origin: string; version: number; kind: string; content_html: string; page: string | null; author: string | null; fetched: string; title: string }>();
+  if (results.length > 1) return `![[${id}]] matches posts in ${results.length} blygs you follow; the spec won't pick one`;
+  const snap = results[0];
+  if (snap?.kind === "withdrawn") return `![[${id}]] is withdrawn at ${snap.title}`;
+  if (snap) {
+    const page = new URL(snap.page ?? `${snap.kind === "thread" ? "t" : "f"}/${id}/`, snap.origin).href;
+    return {
+      version: snap.version,
+      html: snap.content_html,
+      origin: snap.origin,
+      cited: { source: snap.title, ...(snap.author ? { author: snap.author } : {}), excerpt: clip(textContent(snap.content_html), 200), url: page, retrieved: snap.fetched },
+    };
+  }
   const imported = await db.prepare("SELECT 1 FROM imported WHERE item_id = ? LIMIT 1").bind(id).first();
-  if (imported) return `![[${id}]] is from a blyg you follow; blyxt can only quote your own posts for now`;
-  return `![[${id}]] doesn't match a post here`;
+  if (imported) return `![[${id}]] is from a blyg you follow, but blyxt hasn't kept a copy of it yet. try again after the next poll`;
+  return `![[${id}]] doesn't match a post here or in a blyg you follow`;
+}
+
+// a caption from text as it reads, not markdown (§5.9 caps it near 200 characters)
+function clip(text: string, n: number) {
+  const s = text.replace(/\s+/g, " ").trim();
+  return s.length > n ? s.slice(0, n).trimEnd() + "…" : s;
 }
 
 // the one closure check: walk local threads' stored transclusions looking for the publishing thread (§10.2)
