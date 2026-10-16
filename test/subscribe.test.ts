@@ -242,3 +242,12 @@ describe("later versions of an older Sub post", () => {
     expect(await bump(db, w)).toEqual([["editMessageText", 100], ["sendMessage", 100]]);
   });
 });
+
+test("a stub's Sub message names what it responds to above the quote", async () => {
+  const { messageText } = await import("../src/subscribe");
+  const text = messageText("Them", "https://them.example/blyg/", {
+    id: "4qw45ram8s3cvjc7tyragjgdp0", kind: "thread", version: 1, content_html: "<p>hi</p>",
+    stub_of: { origin: "https://other.example/", id: "1tnzdzm19wq64aqb3dm5verwyr", cited: { source: "Other & Co", url: "https://other.example/t/1tnzdzm19wq64aqb3dm5verwyr/" } },
+  });
+  expect(text).toStartWith('<b>Them</b>\n↩ in response to <a href="https://other.example/t/1tnzdzm19wq64aqb3dm5verwyr/">Other &amp; Co</a>\n\nhi');
+});

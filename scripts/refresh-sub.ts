@@ -23,7 +23,7 @@ for (const row of rows) {
   if (!res.ok) { console.log(`${row.item_id}: ${res.status}, skipped`); continue; }
   const doc = (await res.json()) as Parameters<typeof messageText>[2];
   // only messages with quotes gain anything from quote links; the rest re-render as before
-  const links = doc.content_html?.includes("data-blyg-id") ? await quoteLinks(remoteD1, doc.content_html, row.origin) : undefined;
+  const links = doc.content_html?.includes("data-blyg-id") || doc.stub_of ? await quoteLinks(remoteD1, doc.content_html ?? "", row.origin, doc.stub_of) : undefined;
   const text = messageText(titles.get(row.origin) ?? row.origin, row.origin, doc, links);
   const body = { chat_id: chatId, message_id: row.tg_message_id, text, parse_mode: "HTML", link_preview_options: { is_disabled: true } };
   let edited = await tg(token, "editMessageText", body);

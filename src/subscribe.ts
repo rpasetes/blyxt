@@ -35,7 +35,10 @@ type Imported = {
   replied_at?: string | null;
 };
 type IndexEntry = { id: string; kind: string; created?: string; version: number };
-type ItemDoc = { id: string; kind: string; version: number; content_md?: string; content_html?: string; content_hash?: string; page?: string; author?: { name?: string } };
+type ItemDoc = {
+  id: string; kind: string; version: number; content_md?: string; content_html?: string; content_hash?: string; page?: string; author?: { name?: string };
+  stub_of?: { origin?: string; id?: string; url?: string; cited?: { source?: string; url?: string } };
+};
 
 export type Bot = { token: string; chatId: number };
 // one Sub topic: a grouping of followed blygs
@@ -198,16 +201,37 @@ export function messageText(title: string, origin: string, doc: ItemDoc, quoteLi
   if (doc.kind === "withdrawn") return `<b>${esc(title)}</b> · withdrawn`;
   const link = new URL(doc.page ?? `${doc.kind === "thread" ? "t" : "f"}/${doc.id}/`, origin).href;
   const body = toTelegramHtml(doc.content_html ?? "", origin, MAX_MESSAGE, quoteLinks && ((q) => quoteLinks.get(`${q.origin} ${q.id}`) ?? null));
-  return `<b>${esc(title)}</b>${doc.version > 1 ? ` · v${doc.version}` : ""}\n\n${body}\n\n<a href="${esc(link)}">${esc(link)}</a>`;
+  // a stub names what it responds to up top, where a long quote can't push it out of the message
+  const responds = respondsTo(doc, origin, quoteLinks);
+  return `<b>${esc(title)}</b>${doc.version > 1 ? ` · v${doc.version}` : ""}\n${responds ? `↩ in response to ${responds}\n` : ""}\n${body}\n\n<a href="${esc(link)}">${esc(link)}</a>`;
+}
+
+function respondsTo(doc: ItemDoc, origin: string, quoteLinks?: Map<string, QuoteLink>) {
+  const stub = doc.stub_of;
+  if (!stub) return null;
+  try {
+    if (stub.url) return `<a href="${esc(new URL(stub.url).href)}">${esc(stub.cited?.source ?? new URL(stub.url).host)}</a>`;
+    if (!stub.id || !ID_RE.test(stub.id)) return null;
+    const from = stub.origin ?? origin;
+    const known = quoteLinks?.get(`${from} ${stub.id}`);
+    const url = stub.cited?.url ?? known?.url ?? new URL(`items/${stub.id}.json`, from).href;
+    return `<a href="${esc(new URL(url).href)}">${esc(stub.cited?.source ?? known?.label ?? new URL(from).host)}</a>`;
+  } catch {
+    return null;
+  }
 }
 
 // each quote baked into a post links to what it quotes, like a citation under it: the page as blyxt last read it,
 // else the reference convention for a kind it knows, else the item document, which every blyg serves
-export async function quoteLinks(db: D1Database, html: string, origin: string) {
+export async function quoteLinks(db: D1Database, html: string, origin: string, stub?: ItemDoc["stub_of"]) {
   const links = new Map<string, QuoteLink>();
-  for (const [tag] of html.matchAll(/<blockquote\b[^>]*\bdata-blyg-id="[^"]*"[^>]*>/g)) {
-    const id = tag.match(/data-blyg-id="([^"]*)"/)![1];
-    const from = decode(tag.match(/data-blyg-origin="([^"]*)"/)?.[1] ?? "") || origin;
+  const refs = [...html.matchAll(/<blockquote\b[^>]*\bdata-blyg-id="[^"]*"[^>]*>/g)].map(([tag]) => ({
+    id: tag.match(/data-blyg-id="([^"]*)"/)![1],
+    from: decode(tag.match(/data-blyg-origin="([^"]*)"/)?.[1] ?? "") || origin,
+  }));
+  // a stub's target gets a link too, quoted or not
+  if (stub?.id) refs.push({ id: stub.id, from: stub.origin ?? origin });
+  for (const { id, from } of refs) {
     const key = `${from} ${id}`;
     if (links.has(key) || !ID_RE.test(id)) continue;
     const known = await db.prepare(
@@ -246,7 +270,7 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
 // Edits don't move a message, so a later version of an older post also gets a reply under it,
 // and a burst of versions keeps editing that one reply while it's fresh.
 async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined, text?: string) {
-  text ??= messageText(s.title, s.origin, doc, await quoteLinks(db, doc.content_html ?? "", s.origin));
+  text ??= messageText(s.title, s.origin, doc, await quoteLinks(db, doc.content_html ?? "", s.origin, doc.stub_of));
   let messageId = row?.tg_message_id ?? null;
   let postedAt = row?.posted_at ?? null;
   let replyId = row?.reply_message_id ?? null;
