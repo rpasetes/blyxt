@@ -143,3 +143,17 @@ test("mentions retry on 5xx with backoff, stop on 4xx, and record a blyg with no
   await deliverDue(db);
   expect(row()).toEqual({ status: "failed", attempts: 2, scheduled: 0, last_error: "400 bad target" });
 });
+
+test("a quote of the whole Sub message is a whole quote; a selection across paragraphs is checked as text", async () => {
+  const db = followed();
+  network();
+  db.sqlite.exec(`UPDATE snapshots SET content_html = '<p>First paragraph here.</p>\n<p><a href="https://x.example/">A link</a> by Someone</p>'`);
+  const fromSub = { reply_to_message: { message_id: 2, chat: { id: -100 } }, external_reply: { message_id: 77, chat: { id: -100 } } };
+  // what Telegram attaches when replying to the whole Sub message: blyxt's title line and post link included
+  await pub(db, "whole", { ...fromSub, quote: { text: `Their Blyg\n\nFirst paragraph here.\n\nA link by Someone\n\n${THEM}t/${POST}/` } });
+  await pub(db, "part", { ...fromSub, quote: { text: "here.\n\nA link" } });
+  const rows = db.sqlite.query("SELECT content_md, transclusions FROM items ORDER BY rowid").all() as { content_md: string; transclusions: string }[];
+  expect(rows.map((r) => r.content_md)).toEqual([`![[${POST}]]\n\nwhole`, `![[${POST}]]\n> here.\n> A link\n\npart`]);
+  expect(JSON.parse(rows[0].transclusions)[0].selector).toBeUndefined();
+  expect(JSON.parse(rows[1].transclusions)[0].selector.exact).toBe("here.\nA link");
+});

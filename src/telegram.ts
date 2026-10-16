@@ -1,6 +1,6 @@
 // Telegram webhook: Pub topic publishes, Sub topics manage subscriptions.
 // Bot API: https://core.telegram.org/bots/api
-import { FRAGMENT_CAP, ID_RE, overCap, pagePath, type Site, type StubOf } from "./blyg";
+import { FRAGMENT_CAP, ID_RE, overCap, pagePath, textContent, type Site, type StubOf } from "./blyg";
 import { compose } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
 import { mention } from "./mentions";
@@ -121,12 +121,32 @@ async function quotePrefix(db: D1Database, m: TgMessage): Promise<{ md: string; 
   // (in a topic every message replies to the topic's first message, so check both)
   const external = m.external_reply && (!m.external_reply.chat || m.external_reply.chat.id === m.chat.id) ? m.external_reply.message_id : undefined;
   let id: string | undefined;
+  let followed: { origin: string; item_id: string } | null = null;
   for (const to of [m.reply_to_message?.message_id, external]) {
-    if (to) id ??= (await itemForMessage(db, m.chat.id, to))?.item_id ?? (await followedForMessage(db, to))?.item_id;
+    if (!to || id) continue;
+    id = (await itemForMessage(db, m.chat.id, to))?.item_id;
+    if (!id) id = (followed = await followedForMessage(db, to))?.item_id;
   }
   if (!id) return undefined;
-  const quote = m.quote?.text.trim();
+  const quote = followed ? await unframe(db, followed, m.quote?.text) : m.quote?.text.trim();
   return { md: `![[${id}]]\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n` };
+}
+
+// A quote taken from a Sub message, as the followed post's own text: without the lines blyxt frames it with
+// (blyg title, "in response to", ↳ links, the post's link), and with Telegram's paragraph gaps as single breaks,
+// as text content keeps them (§10.2). A quote of the whole post is a whole quote, not a partial one.
+async function unframe(db: D1Database, post: { origin: string; item_id: string }, quote?: string) {
+  if (!quote?.trim()) return undefined;
+  const sub = await db.prepare("SELECT title FROM subscriptions WHERE origin = ?").bind(post.origin).first<{ title: string }>();
+  const lines = quote.split("\n").map((l) => l.trim());
+  if (sub && (lines[0] === sub.title || lines[0]?.startsWith(`${sub.title} · v`))) lines.shift();
+  const text = lines
+    .filter((l) => !l.startsWith("↩ in response to ") && !l.startsWith("↳ ") && !/^https?:\/\/\S+$/.test(l))
+    .filter((l, i, all) => l || (i > 0 && all[i - 1])) // one break between paragraphs
+    .join("\n").replace(/\n+/g, "\n").trim();
+  const snap = await db.prepare("SELECT content_html FROM snapshots WHERE origin = ? AND item_id = ?").bind(post.origin, post.item_id).first<{ content_html: string }>();
+  if (snap && text === textContent(snap.content_html).replace(/\n+/g, "\n").trim()) return undefined;
+  return text || undefined;
 }
 
 // the followed post a Sub message shows (or a reply blyxt posted under it for a later version)
