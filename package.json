@@ -12,7 +12,8 @@
     "typecheck": "tsc",
     "test": "bun test",
     "refresh-sub": "bun --env-file=.dev.vars scripts/refresh-sub.ts",
-    "draft": "bun --env-file=.dev.vars scripts/draft.ts"
+    "draft": "bun --env-file=.dev.vars scripts/draft.ts",
+    "backfill-snapshots": "bun scripts/backfill-snapshots.ts"
   },
   "trustedDependencies": [
     "esbuild",
