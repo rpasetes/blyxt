@@ -5,7 +5,7 @@ import { compose } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
 import { mention } from "./mentions";
 import { resolve } from "./resolve";
-import { getItem, itemForMessage, lastContent, pin, publishEdit, publishNew, republish, revise, withdraw } from "./store";
+import { clearNote, getItem, itemForMessage, lastContent, NOTE_MINUTES, pendingNote, pin, publishEdit, publishNew, queueNote, republish, revise, withdraw } from "./store";
 import {
   addLegacySubscription,
   addSubscription,
@@ -194,18 +194,19 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (composed.thread && current?.authored_kind === "fragment") {
     return () => reply(cfg, m, "edit not published: a fragment can't quote. send it as a new message (or reply to the post you're quoting)");
   }
-  const item = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions });
-  if (!item) {
+  const edited = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions });
+  if (!edited) {
     if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
     return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
   }
+  const { item, note } = edited;
   return async () => {
-    await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}`);
+    await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}${note ? `\nnote: ${note}` : ""}`);
     await mention(db, site, item);
   };
 }
 
-const PUB_USAGE = "reply to a published post with /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); reply to a draft with /publish or /discard";
+const PUB_USAGE = "reply to a published post with /note <what you're changing> before editing it, /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); reply to a draft with /publish or /discard";
 
 // the post a command names: the message it replies to, else a link or id as the first argument
 // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
@@ -221,9 +222,10 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
   const [command, ...args] = m.text!.trim().split(/\s+/);
   const name = command.slice(1).split("@")[0].toLowerCase();
   if (name === "publish" || name === "discard") return handleDraftCommand(m, name, db, site, cfg);
-  if (!["withdraw", "republish", "pin"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
+  if (!["note", "withdraw", "republish", "pin"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
   const id = await target(m, db, args);
   if (!id) return () => reply(cfg, m, PUB_USAGE);
+  if (name === "note") return handleNote(m, id, args.join(" "), db, cfg);
   if (name === "pin") return handlePin(m, null, id, db, site, cfg, args[0]);
   if (name === "republish") return handleRepublish(m, id, args.join(" ") || null, db, site, cfg);
 
@@ -238,6 +240,20 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
   const existing = await getItem(db, id);
   if (!existing) return () => reply(cfg, m, `no post ${id} on this blyg`);
   return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
+}
+
+// /note queues the changelog note for a post's next edit; /note alone takes it back
+async function handleNote(m: TgMessage, id: string, note: string, db: D1Database, cfg: Config) {
+  const item = await getItem(db, id);
+  if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
+  if (!note) {
+    const had = await pendingNote(db, id);
+    await clearNote(db, id);
+    return () => reply(cfg, m, had ? `dropped the note "${had}"; the next edit publishes without one` : "no note queued for this post");
+  }
+  if (item.kind === "withdrawn") return () => reply(cfg, m, "this post is withdrawn: reply /republish <note> to bring it back with a note");
+  await queueNote(db, id, note);
+  return () => reply(cfg, m, `noted. your next edit publishes v${item.version + 1} with "${note}" (within ${NOTE_MINUTES} minutes; /note alone drops it)`);
 }
 
 // a draft another client submitted becomes v1 only when you /publish it in Pub; the preview message

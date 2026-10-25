@@ -116,10 +116,31 @@ export async function lastStub(db: D1Database, id: string) {
 
 // next version of a published item; null when the text didn't change or the item is withdrawn
 // (a thread re-resolves on every publish, so unchanged text is still unchanged content: snapshots refresh on the next edit)
+// an edit's next version, with the note queued by /note if there is a fresh one
 export async function publishEdit(db: D1Database, id: string, c: Content) {
   const item = await getItem(db, id);
   if (!item || item.kind === "withdrawn" || item.content_md === c.md) return null;
-  return bump(db, item, item.kind, c, null);
+  const note = await pendingNote(db, id);
+  const next = await bump(db, item, item.kind, c, note);
+  if (note) await clearNote(db, id);
+  return { item: next, note };
+}
+
+// a queued note waits this long for the edit it describes
+export const NOTE_MINUTES = 60;
+
+export const queueNote = (db: D1Database, id: string, note: string) =>
+  db.prepare("INSERT INTO pending_notes (item_id, note, at) VALUES (?, ?, ?) ON CONFLICT (item_id) DO UPDATE SET note = excluded.note, at = excluded.at")
+    .bind(id, note, now()).run();
+
+export const clearNote = (db: D1Database, id: string) => db.prepare("DELETE FROM pending_notes WHERE item_id = ?").bind(id).run();
+
+export async function pendingNote(db: D1Database, id: string) {
+  const row = await db.prepare("SELECT note, at FROM pending_notes WHERE item_id = ?").bind(id).first<{ note: string; at: string }>();
+  if (!row) return null;
+  if (Date.parse(row.at) > Date.now() - NOTE_MINUTES * 60_000) return row.note;
+  await clearNote(db, id);
+  return null;
 }
 
 // a revision draft's publish: the next version, with a note; null when the post is withdrawn or moved past base
