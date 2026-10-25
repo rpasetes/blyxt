@@ -145,8 +145,13 @@ async function unframe(db: D1Database, post: { origin: string; item_id: string }
     .filter((l, i, all) => l || (i > 0 && all[i - 1])) // one break between paragraphs
     .join("\n").replace(/\n+/g, "\n").trim();
   const snap = await db.prepare("SELECT content_html FROM snapshots WHERE origin = ? AND item_id = ?").bind(post.origin, post.item_id).first<{ content_html: string }>();
-  if (snap && text === textContent(snap.content_html).replace(/\n+/g, "\n").trim()) return undefined;
-  return text || undefined;
+  if (!snap) return text || undefined;
+  const own = textContent(snap.content_html).replace(/\n+/g, "\n").trim();
+  // Sub shows images as [image] / [image: alt] links (tghtml), but they have no text in the post itself
+  const unlabeled = text.replace(/\[image(?:: [^\]\n]*)?\]/g, "").split("\n").map((l) => l.replace(/[^\S\n]+/g, " ").trim()).filter(Boolean).join("\n");
+  const quoted = own.includes(text) || !own.includes(unlabeled) ? text : unlabeled;
+  if (quoted === own) return undefined;
+  return quoted || undefined;
 }
 
 // the followed post a Sub message shows (or a reply blyxt posted under it for a later version)

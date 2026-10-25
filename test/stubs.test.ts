@@ -157,3 +157,15 @@ test("a quote of the whole Sub message is a whole quote; a selection across para
   expect(JSON.parse(rows[0].transclusions)[0].selector).toBeUndefined();
   expect(JSON.parse(rows[1].transclusions)[0].selector.exact).toBe("here.\nA link");
 });
+
+test("images in a Sub message quote as the post's own text: their [image] labels aren't part of it", async () => {
+  const db = followed();
+  network();
+  db.sqlite.exec(`UPDATE snapshots SET content_html = '<p>Look at <img src="https://them.example/a.png" alt="a cat"> this.</p>\n<p><img src="https://them.example/b.png"></p>\n<p>Last words.</p>'`);
+  const fromSub = { reply_to_message: { message_id: 2, chat: { id: -100 } }, external_reply: { message_id: 77, chat: { id: -100 } } };
+  await pub(db, "whole", { ...fromSub, quote: { text: `Their Blyg\n\nLook at [image: a cat] this.\n\n[image]\n\nLast words.\n\n${THEM}t/${POST}/` } });
+  await pub(db, "part", { ...fromSub, quote: { text: "[image: a cat] this.\n\n[image]\n\nLast" } });
+  const rows = db.sqlite.query("SELECT content_md, transclusions FROM items ORDER BY rowid").all() as { content_md: string; transclusions: string }[];
+  expect(rows.map((r) => r.content_md)).toEqual([`![[${POST}]]\n\nwhole`, `![[${POST}]]\n> this.\n> Last\n\npart`]);
+  expect(JSON.parse(rows[1].transclusions)[0].selector.exact).toBe("this.\nLast");
+});
