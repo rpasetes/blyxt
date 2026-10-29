@@ -25,19 +25,17 @@ function diff(before: string, after: string) {
   return { removed: cut(a.filter((l) => !b.includes(l))), added: cut(b.filter((l) => !a.includes(l))) };
 }
 
-const words = (s: string) => s.toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
+// words, case-folded; an apostrophe inside a word stays (don't), quotes around one don't ('teh' is teh)
+const words = (s: string) => (s.toLowerCase().match(/[\p{L}\p{N}'’]+/gu) ?? []).map((w) => w.replace(/^['’]+|['’]+$/g, "")).filter(Boolean);
 
-// a changelog note must not reproduce withheld prior text (§5.2): refuse any note carrying six words in a row
-// that the old version had and the new one doesn't. Checked here, whatever the model was told
+// a changelog note must not reproduce withheld prior text (§5.2), and notes travel far (they title feed entries,
+// §7). The text most worth withholding is often one word: a removed name, a misspelling fixed. So a note may not
+// use any word (3+ letters, case-folded) that the old version had and the new one doesn't. Checked here, whatever
+// the model was told; a refused note is no note, which is the safe side of a MUST
 export function reproducesRemoved(note: string, before: string, after: string) {
-  const kept = ` ${words(after).join(" ")} `;
-  const old = words(before);
-  const said = ` ${words(note).join(" ")} `;
-  for (let i = 0; i + 6 <= old.length; i++) {
-    const run = ` ${old.slice(i, i + 6).join(" ")} `;
-    if (!kept.includes(run) && said.includes(run)) return true;
-  }
-  return false;
+  const kept = new Set(words(after));
+  const removed = new Set(words(before).filter((w) => [...w].length >= 3 && !kept.has(w)));
+  return words(note).some((w) => removed.has(w));
 }
 
 export async function writeNote(ai: NoteModel | undefined, before: string, after: string, timeoutMs = TIMEOUT_MS): Promise<string | null> {

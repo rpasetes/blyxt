@@ -72,7 +72,11 @@ test("a failed, slow, long or copying answer publishes with no note; a withdrawa
   // a changelog note must not reproduce withheld prior text (§5.2)
   const before = "the old claim was that feeds should never be read by machines at all";
   expect(await writeNote(model("Removed that feeds should never be read by machines.").ai, before, "something else")).toBeNull();
-  expect(reproducesRemoved("Cut the old claim about machine readers.", before, "something else")).toBe(false);
+  // short withheld text counts too: a removed name, a fixed misspelling
+  expect(reproducesRemoved("Removed the mention of Bob.", "thanks to Bob and Ann for reading", "thanks to Ann for reading")).toBe(true);
+  expect(reproducesRemoved("Changed 'teh' to 'the'.", "teh feed is chatty", "the feed is chatty")).toBe(true);
+  expect(reproducesRemoved("Reworded the opening.", "feeds are noisy by design", "feeds are chatty by design")).toBe(false);
+  expect(await writeNote(model("Removed the mention of Bob.").ai, "thanks to Bob and Ann", "thanks to Ann")).toBeNull();
 
   const { ai, asked } = model();
   const post = await pub(db, ai, "words");
