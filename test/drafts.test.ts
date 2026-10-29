@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { itemDocument } from "../src/blyg";
+import { contentHash, itemDocument } from "../src/blyg";
 import { changes, handleDraftRequest } from "../src/drafts";
 import { changelog, getItem } from "../src/store";
 import { handleUpdate, type TgMessage } from "../src/telegram";
@@ -182,4 +182,15 @@ test("a revision draft is checked against the post it revises", async () => {
 test("the change summary names sections, never their text", () => {
   expect(changes("intro\n# A\none\n# B\ntwo", "intro\n# A\nONE\n# C\nthree")).toBe("edited A; added C; removed B (+2 characters)");
   expect(changes("same words", "same  words.")).toBe("edited (opening) (+2 characters)");
+});
+
+test("a draft sent with CRLF line endings is stored as LF, so it hashes the same (§10.1, #76)", async () => {
+  const db = d1();
+  bot();
+  expect((await submit(db, { content_md: "one\r\ntwo\r\n\r\nthree\r\n" })).status).toBe(201);
+  await command(db, "/publish", 500);
+  const { item_id } = db.sqlite.query("SELECT item_id FROM tg_messages WHERE message_id = 500").get() as { item_id: string };
+  const item = (await getItem(db, item_id))!;
+  expect(item.content_md).toBe("one\ntwo\n\nthree");
+  expect(item.content_hash).toBe(await contentHash("one\ntwo\n\nthree"));
 });

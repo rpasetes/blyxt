@@ -92,12 +92,17 @@ export async function contentHash(md: string) {
 export const esc = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-// [[id]] is a plain internal link; ![[id]] and [[id@vN]] inline are inert text (§10.1)
-const LINK = /^(!?)\[\[([0-9a-z]{26})(@v\d+)?\]\]/;
+// [[id]] is a plain internal link; ![[id]] and [[id@vN]] inline are inert text (§10.1).
+// Either form may carry the author's label after a pipe, up to ]]: [[id | text]] (0.4, #70)
+const LABEL = String.raw`(?:[ \t]*\|((?:(?!\]\])[^\n])*))?`;
+const LINK = new RegExp(String.raw`^(!?)\[\[([0-9a-z]{26})(@v\d+)?${LABEL}\]\]`);
 // a line that is only ![[id]] is a transclusion directive; blank lines after it detach a following blockquote
-const DIRECTIVE = /^[ \t]*!\[\[([0-9a-z]{26})(@v\d+)?\]\][ \t]*(?:\n|$)((?:[ \t]*\n)*)/;
-type LinkToken = { type: "blygLink"; raw: string; id: string; live: boolean };
-type DirectiveToken = { type: "blygDirective"; raw: string; id: string; versioned: boolean; detached: boolean; live?: boolean; selection?: string };
+const DIRECTIVE = new RegExp(String.raw`^[ \t]*!\[\[([0-9a-z]{26})(@v\d+)?${LABEL}\]\][ \t]*(?:\n|$)((?:[ \t]*\n)*)`);
+const DIRECTIVE_LINE = new RegExp(String.raw`(^|\n)[ \t]*!\[\[[0-9a-z]{26}(@v\d+)?${LABEL}\]\][ \t]*(\n|$)`);
+// whitespace around the pipe is trimmed, and an empty label is no label
+const labelOf = (raw: string | undefined) => raw?.trim() || undefined;
+type LinkToken = { type: "blygLink"; raw: string; id: string; live: boolean; label?: string };
+type DirectiveToken = { type: "blygDirective"; raw: string; id: string; versioned: boolean; detached: boolean; live?: boolean; selection?: string; label?: string };
 export type LinkTarget = { url: string; label: string };
 // what a directive bakes: the source's html at the version the publisher holds (§10.2)
 export type Snapshot = { version: number; html: string; origin?: string; cited?: Cited };
@@ -116,28 +121,30 @@ const md = new Marked({
     start: (src: string) => { const i = src.search(/!?\[\[/); return i < 0 ? undefined : i; },
     tokenizer(src: string): LinkToken | undefined {
       const m = LINK.exec(src);
-      if (m) return { type: "blygLink", raw: m[0], id: m[2], live: !m[1] && !m[3] };
+      if (m) return { type: "blygLink", raw: m[0], id: m[2], live: !m[1] && !m[3], label: labelOf(m[4]) };
     },
     renderer(token) {
       const t = token as LinkToken;
       const target = t.live ? context.links.get(t.id) : undefined;
-      return target ? `<a href="${esc(target.url)}">${esc(target.label)}</a>` : esc(t.raw);
+      // the author's label is the anchor text; without one, the publisher's choice
+      return target ? `<a href="${esc(target.url)}">${esc(t.label ?? target.label)}</a>` : esc(t.raw);
     },
   }, {
     name: "blygDirective",
     level: "block",
     // lets a directive line interrupt a paragraph
-    start: (src: string) => { const m = /(^|\n)[ \t]*!\[\[[0-9a-z]{26}(@v\d+)?\]\][ \t]*(\n|$)/.exec(src); return m ? m.index + m[1].length : undefined; },
+    start: (src: string) => { const m = DIRECTIVE_LINE.exec(src); return m ? m.index + m[1].length : undefined; },
     tokenizer(src: string): DirectiveToken | undefined {
       const m = DIRECTIVE.exec(src);
-      if (m) return { type: "blygDirective", raw: m[0], id: m[1], versioned: !!m[2], detached: !!m[3] };
+      if (m) return { type: "blygDirective", raw: m[0], id: m[1], versioned: !!m[2], label: labelOf(m[3]), detached: !!m[4] };
     },
     renderer(token) {
       const t = token as DirectiveToken;
       const snap = t.live ? context.quotes.get(t.id) : undefined;
       // only top-level lines are directives; one inside a quote or list is text
       if (!snap) return `<p>${esc(t.raw.trim())}</p>\n`;
-      const attrs = `data-blyg-id="${t.id}" data-blyg-version="${snap.version}"${snap.origin ? ` data-blyg-origin="${esc(snap.origin)}"` : ""}`;
+      // a label travels in the bake as the quoter's words, and nowhere else (§10.2, #81)
+      const attrs = `data-blyg-id="${t.id}" data-blyg-version="${snap.version}"${snap.origin ? ` data-blyg-origin="${esc(snap.origin)}"` : ""}${t.label ? ` data-blyg-label="${esc(t.label)}"` : ""}`;
       if (t.selection === undefined) return `<blockquote class="blyg-transclusion" ${attrs}>${snap.html}</blockquote>\n`;
       return `<blockquote class="blyg-transclusion blyg-partial" ${attrs}>\n${t.selection.split("\n").map((l) => `<p>${esc(l)}</p>`).join("\n")}\n</blockquote>\n`;
     },

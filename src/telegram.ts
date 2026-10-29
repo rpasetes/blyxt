@@ -1,7 +1,7 @@
 // Telegram webhook: Pub topic publishes, Sub topics manage subscriptions.
 // Bot API: https://core.telegram.org/bots/api
 import { FRAGMENT_CAP, ID_RE, overCap, pagePath, textContent, type Site, type StubOf } from "./blyg";
-import { compose } from "./compose";
+import { compose, labelFor } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
 import { mention } from "./mentions";
 import { resolve } from "./resolve";
@@ -129,8 +129,14 @@ async function quotePrefix(db: D1Database, m: TgMessage): Promise<{ md: string; 
   }
   if (!id) return undefined;
   const quote = followed ? await unframe(db, followed, m.quote?.text) : m.quote?.text.trim();
-  return { md: `![[${id}]]\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n` };
+  return { md: `${await directive(db, id)}\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n` };
 }
+
+// the directive line blyxt writes, labelled with what it quotes
+const directive = async (db: D1Database, id: string) => {
+  const label = await labelFor(db, id);
+  return `![[${id}${label ? ` | ${label}` : ""}]]`;
+};
 
 // A quote taken from a Sub message, as the followed post's own text: without the lines blyxt frames it with
 // (blyg title, "in response to", ↳ links, the post's link), and with Telegram's paragraph gaps as single breaks,
@@ -169,7 +175,7 @@ async function linkPrefix(db: D1Database, site: Site, m: TgMessage) {
     if (!url.startsWith(origin)) continue;
     const id = url.slice(origin.length).match(/^(?:[ft]\/([0-9a-z]{26})\/?(?:v\d+\/?)?|items\/([0-9a-z]{26})\.json)(?:[?#].*)?$/);
     const found = id?.[1] ?? id?.[2];
-    if (found && ID_RE.test(found)) return { md: `![[${found}]]\n\n`, rest: rest.join("\n") };
+    if (found && ID_RE.test(found)) return { md: `${await directive(db, found)}\n\n`, rest: rest.join("\n") };
   }
   return undefined;
 }

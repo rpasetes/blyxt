@@ -65,7 +65,7 @@ test("replying from Pub to a followed post in Sub publishes a stub of it, and te
     cited: { source: "Their Blyg", author: "Them", excerpt: "This seems like an important piece so maybe we can do a blygging party around it.", url: `${THEM}t/${POST}/`, retrieved: "2026-10-16T03:00:00Z" },
   });
   expect(d.transclusions).toEqual([{ id: POST, version: 1, origin: THEM, selector: { exact: "an important piece", prefix: "This seems like ", suffix: " so maybe we can do a blygging p" } }]);
-  expect(d.content_html).toStartWith(`<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="${POST}" data-blyg-version="1" data-blyg-origin="${THEM}">`);
+  expect(d.content_html).toStartWith(`<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="${POST}" data-blyg-version="1" data-blyg-origin="${THEM}" data-blyg-label="Their Blyg: This seems like an important piece so maybe we c…">`);
   expect(replies(calls).at(-1)).toBe(`published thread v1 (stub of Their Blyg; they've been told) → https://me.example/blyg/t/${id}/`);
   expect(mentions(calls)).toEqual([{ source: `https://me.example/blyg/t/${id}/`, target: `${THEM}t/${POST}/` }]);
   expect(db.sqlite.query("SELECT status, relation FROM mentions_out").get()).toEqual({ status: "sent", relation: "stub" });
@@ -80,10 +80,10 @@ test("a message opening with a followed post's link stubs it, and edits keep the
   const calls = network();
   const msg = await pub(db, `${THEM}t/${POST}/\nMy comments.`);
   const { id } = only(db);
-  expect((await getItem(db, id))!.content_md).toBe(`![[${POST}]]\n\nMy comments.`);
+  expect((await getItem(db, id))!.content_md).toBe(`![[${POST} | Their Blyg: This seems like an important piece so maybe we c…]]\n\nMy comments.`);
   await pub(db, `${THEM}t/${POST}/\nMy longer comments.`, {}, msg);
   const d = await doc(db, id);
-  expect([d.version, d.content_md, d.stub_of.id]).toEqual([2, `![[${POST}]]\n\nMy longer comments.`, POST]);
+  expect([d.version, d.content_md, d.stub_of.id]).toEqual([2, `![[${POST} | Their Blyg: This seems like an important piece so maybe we c…]]\n\nMy longer comments.`, POST]);
   expect(mentions(calls)).toHaveLength(1);
 });
 
@@ -153,7 +153,7 @@ test("a quote of the whole Sub message is a whole quote; a selection across para
   await pub(db, "whole", { ...fromSub, quote: { text: `Their Blyg\n\nFirst paragraph here.\n\nA link by Someone\n\n${THEM}t/${POST}/` } });
   await pub(db, "part", { ...fromSub, quote: { text: "here.\n\nA link" } });
   const rows = db.sqlite.query("SELECT content_md, transclusions FROM items ORDER BY rowid").all() as { content_md: string; transclusions: string }[];
-  expect(rows.map((r) => r.content_md)).toEqual([`![[${POST}]]\n\nwhole`, `![[${POST}]]\n> here.\n> A link\n\npart`]);
+  expect(rows.map((r) => r.content_md)).toEqual([`![[${POST} | Their Blyg: First paragraph here.]]\n\nwhole`, `![[${POST} | Their Blyg: First paragraph here.]]\n> here.\n> A link\n\npart`]);
   expect(JSON.parse(rows[0].transclusions)[0].selector).toBeUndefined();
   expect(JSON.parse(rows[1].transclusions)[0].selector.exact).toBe("here.\nA link");
 });
@@ -166,6 +166,6 @@ test("images in a Sub message quote as the post's own text: their [image] labels
   await pub(db, "whole", { ...fromSub, quote: { text: `Their Blyg\n\nLook at [image: a cat] this.\n\n[image]\n\nLast words.\n\n${THEM}t/${POST}/` } });
   await pub(db, "part", { ...fromSub, quote: { text: "[image: a cat] this.\n\n[image]\n\nLast" } });
   const rows = db.sqlite.query("SELECT content_md, transclusions FROM items ORDER BY rowid").all() as { content_md: string; transclusions: string }[];
-  expect(rows.map((r) => r.content_md)).toEqual([`![[${POST}]]\n\nwhole`, `![[${POST}]]\n> this.\n> Last\n\npart`]);
+  expect(rows.map((r) => r.content_md)).toEqual([`![[${POST} | Their Blyg: Look at this.]]\n\nwhole`, `![[${POST} | Their Blyg: Look at this.]]\n> this.\n> Last\n\npart`]);
   expect(JSON.parse(rows[1].transclusions)[0].selector.exact).toBe("this.\nLast");
 });

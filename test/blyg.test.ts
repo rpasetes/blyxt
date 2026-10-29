@@ -70,6 +70,25 @@ test("directive lines are found outside code only", () => {
   expect(directives(`> ![[${A}]]\n\n- ![[${B}]]`)).toEqual([]);
 });
 
+test("a link's label is its anchor text; an empty label is none, and the label may hold a pipe", () => {
+  const links = new Map([[A, { url: `https://example.com/blyg/f/${A}/`, label: "a post" }]]);
+  expect(linkIds(`see [[${A} | the opening fragment]]`)).toEqual([A]);
+  expect(render(`see [[${A} | the opening fragment]]`, site.origin, links)).toContain(`<a href="https://example.com/blyg/f/${A}/">the opening fragment</a>`);
+  expect(render(`see [[${A}|a | b]]`, site.origin, links)).toContain(`>a | b</a>`);
+  expect(render(`see [[${A} | ]]`, site.origin, links)).toContain(`>a post</a>`);
+  // text in brackets that doesn't open with an id is literal (§10.1)
+  expect(linkIds(`[[not an id | x]]`)).toEqual([]);
+});
+
+test("a directive's label bakes as data-blyg-label and changes nothing else (§10.2, #81)", () => {
+  const quotes = new Map([[A, { version: 2, html: "<p>quoted</p>" }]]);
+  const bare = render(`![[${A}]]\n\nmine`, site.origin, new Map(), quotes);
+  const labelled = render(`![[${A} | a "fine" <post>]]\n\nmine`, site.origin, new Map(), quotes);
+  expect(labelled).toBe(bare.replace(`data-blyg-version="2"`, `data-blyg-version="2" data-blyg-label="a &quot;fine&quot; &lt;post&gt;"`));
+  expect(directives(`![[${A} | a note]]\n> quoted`)).toEqual(directives(`![[${A}]]\n> quoted`));
+  expect(directives(`![[${A}@v2 | x]]`)).toEqual([{ id: A, versioned: true, selection: undefined }]);
+});
+
 test("an attached blockquote is a selection; a blank line detaches it", () => {
   expect(directives(`![[${A}]]\n> quoted *bit*\n> line two\n\nmine`)).toEqual([{ id: A, versioned: false, selection: "quoted bit\nline two" }]);
   expect(directives(`![[${A}]]\n\n> my own quote`)).toEqual([{ id: A, versioned: false, selection: undefined }]);

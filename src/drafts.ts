@@ -66,7 +66,8 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
   if (!authorized(req, token)) return fail(401, "unauthorized");
 
   const body = (await req.json().catch(() => null)) as { content_md?: unknown; generated?: unknown; update?: unknown; note?: unknown; note_generated?: unknown } | null;
-  const md = typeof body?.content_md === "string" ? body.content_md.trim() : "";
+  // a line ends at LF or CRLF alike (§10.1, #76); stored as LF, so the hash doesn't depend on the sender's OS
+  const md = typeof body?.content_md === "string" ? body.content_md.replace(/\r\n?/g, "\n").trim() : "";
   if (!md) return fail(400, "content_md is required");
   if ([...md].length > MAX_DRAFT) return fail(400, `drafts stay within ${MAX_DRAFT.toLocaleString("en")} characters`);
   const note = typeof body!.note === "string" && body!.note.trim() ? body!.note.trim() : null;

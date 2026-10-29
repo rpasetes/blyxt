@@ -9,6 +9,7 @@ export type Composed =
 
 // self: the thread being edited, which may not quote itself, directly or through other local threads
 export async function compose(db: D1Database, origin: string, src: string, self?: string): Promise<Composed> {
+  src = src.replace(/\r\n?/g, "\n");
   const found = directives(src);
   if (found.some((d) => d.versioned)) return { ok: false, error: "![[id@vN]] is reserved by the spec and can't be published" };
 
@@ -77,6 +78,24 @@ async function resolveQuote(db: D1Database, origin: string, id: string, self?: s
 }
 
 // a caption from text as it reads, not markdown (§5.9 caps it near 200 characters)
+// the label blyxt writes on a quote it opens for you, so the source still says what it quotes (§10.1, #70):
+// "blyg: opening words" for a followed post, the opening words for your own. It is the quoter's words and
+// bakes as data-blyg-label (#81); never ]] (a label can't contain it) or a line break
+export async function labelFor(db: D1Database, id: string) {
+  const local = await getItem(db, id);
+  let label: string;
+  if (local) label = excerpt(local.content_md, 60);
+  else {
+    const snap = await db.prepare("SELECT s.content_html, sub.title FROM snapshots s LEFT JOIN subscriptions sub ON sub.origin = s.origin WHERE s.item_id = ? ORDER BY s.fetched DESC LIMIT 1")
+      .bind(id).first<{ content_html: string; title: string | null }>();
+    if (!snap) return undefined;
+    const opening = textContent(snap.content_html).split("\n")[0] ?? "";
+    label = snap.title ? `${snap.title}: ${opening}` : opening;
+  }
+  label = clip(label.replace(/[\[\]]/g, ""), 60);
+  return label || undefined;
+}
+
 function clip(text: string, n: number) {
   const s = text.replace(/\s+/g, " ").trim();
   return s.length > n ? s.slice(0, n).trimEnd() + "…" : s;
