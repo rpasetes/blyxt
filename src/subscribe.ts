@@ -25,6 +25,8 @@ export type Subscription = {
   item_tpl?: string | null;
   pin_tpl?: string | null;
   manifest_checked?: string | null;
+  // where the manifest last redirected to, once blyxt has said so
+  moved_to?: string | null;
 };
 
 type Imported = {
@@ -182,9 +184,20 @@ function surface(manifest: Manifest, origin: string) {
 
 // Re-read a followed blyg's manifest and follow its surface where it now says it lives. A manifest that can't
 // be read leaves everything as it was until the next check: a missing manifest is the poll's problem, not this one's
-async function refreshManifest(db: D1Database, s: Subscription): Promise<Subscription> {
+async function refreshManifest(db: D1Database, bot: Bot, s: Subscription): Promise<Subscription> {
   const at = now();
   const res = await get(new URL("blyg.json", s.origin).href).catch(() => null);
+  // identity is where the bytes came from (§12.2): a manifest that redirects elsewhere speaks for another origin,
+  // and following it is the user's call, never automatic. Say so once, and keep everything as it was
+  const from = res?.url ? res.url.replace(/[^/]*$/, "") : s.origin;
+  if (res?.ok && from !== s.origin) {
+    if (s.moved_to !== from) {
+      await announce(bot, (await followers(db, s.origin)).topics,
+        `${s.title}'s manifest now redirects to ${from}. blyxt keeps following ${s.origin} as it was; /subscribe ${from} to follow it there.`);
+    }
+    await db.prepare("UPDATE subscriptions SET manifest_checked = ?, moved_to = ? WHERE origin = ?").bind(at, from, s.origin).run();
+    return { ...s, manifest_checked: at, moved_to: from };
+  }
   const manifest = res?.ok ? parseManifest(await res.text()) : null;
   if (!manifest) {
     await db.prepare("UPDATE subscriptions SET manifest_checked = ? WHERE origin = ?").bind(at, s.origin).run();
@@ -470,7 +483,7 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
   if (s.legacy) return pollLegacy(db, bot, s, budget);
   if (!s.manifest_checked || s.manifest_checked < minutesFromNow(-MANIFEST_HOURS * 60)) {
     budget.left--;
-    s = await refreshManifest(db, s);
+    s = await refreshManifest(db, bot, s);
   }
   budget.left--;
   // while lossy, the stored ETag is the feed's

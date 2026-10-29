@@ -288,3 +288,26 @@ test("a manifest's item template is where blyxt fetches items, and a re-read man
   expect(db.sqlite.query("SELECT index_url, item_tpl FROM subscriptions").get()).toEqual({ index_url: "https://b.example/api/index", item_tpl: "https://b.example/api/{id}" });
   expect(db.sqlite.query("SELECT version FROM imported").get()).toEqual({ version: 2 });
 });
+
+test("a manifest that redirects to another origin moves nothing: blyxt says so once, and following there is the user's call (§12.2)", async () => {
+  const db = d1();
+  const w = world({ [A]: { version: 1, created: "2026-10-20T00:00:00Z" } });
+  await addSubscription(db, { ...BOT, topicId: 3 }, ORIGIN, MANIFEST);
+  const before = db.sqlite.query("SELECT index_url, feed_url, item_tpl FROM subscriptions").get();
+  const NEW = "https://elsewhere.example/blyg/";
+  const inner = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input) !== ORIGIN + "blyg.json") return inner(input, init);
+    const res = Response.json({ blyg: "0.4", title: "B", items: `${NEW}items/index.json`, item: `${NEW}items/{id}.json` });
+    Object.defineProperty(res, "url", { value: NEW + "blyg.json" });
+    return res;
+  }) as typeof fetch;
+  for (let i = 0; i < 2; i++) {
+    db.sqlite.exec("UPDATE subscriptions SET manifest_checked = '2026-01-01T00:00:00Z'");
+    due(db);
+    await pollDue(db, BOT);
+  }
+  expect(db.sqlite.query("SELECT index_url, feed_url, item_tpl FROM subscriptions").get()).toEqual(before);
+  const notices = w.telegram.filter((c) => c.method === "sendMessage" && String(c.body.text).includes("redirects to"));
+  expect(notices.map((c) => c.body.text)).toEqual([`B's manifest now redirects to ${NEW}. blyxt keeps following ${ORIGIN} as it was; /subscribe ${NEW} to follow it there.`]);
+});
