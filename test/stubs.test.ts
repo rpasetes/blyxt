@@ -214,3 +214,19 @@ test("a remote link with no known page points at the target's item document, nev
   const d = await doc(db, only(db).id);
   expect(d.content_html).toContain(`<a href="${THEM}items/${POST}.json">`);
 });
+
+test("with no known page, a link's href, a quote's cited url and the mention target are the item document by template", async () => {
+  const db = followed();
+  const calls = network();
+  db.sqlite.run(`UPDATE snapshots SET page = NULL`);
+  db.sqlite.run(`UPDATE subscriptions SET item_tpl = 'https://them.example/api/{id}?f=json'`);
+  const doc_ = `https://them.example/api/${POST}?f=json`;
+  await pub(db, `see [[${POST}]]`);
+  expect((await doc(db, only(db).id)).content_html).toContain(`<a href="${doc_}">`);
+  await pub(db, `${THEM}t/${POST}/\nMy comments.`);
+  const stub = db.sqlite.query("SELECT id FROM items WHERE stub_of IS NOT NULL").get() as { id: string };
+  expect((await doc(db, stub.id)).stub_of.cited.url).toBe(doc_);
+  const targets = db.sqlite.query("SELECT DISTINCT target FROM mentions_out").all() as { target: string }[];
+  expect(targets.map((t) => t.target)).toEqual([doc_]);
+  expect(mentions(calls).every((m) => m.target === doc_)).toBe(true);
+});

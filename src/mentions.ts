@@ -1,7 +1,7 @@
 // Outbound Webmention (§15.2): telling another blyg it was stubbed or quoted. Fire-and-forget: a publish
 // never waits on it, failures retry from the cron with backoff, and the outcome is information, never an error.
 import { now, pagePath, type Item, type Link, type Site, type StubOf, type Transclusion } from "./blyg";
-import { USER_AGENT } from "./resolve";
+import { itemDocUrl, USER_AGENT } from "./resolve";
 import { lastStub } from "./store";
 
 // a link names a page, not a version (§10.3a): its version is 0, so it is sent once and never re-sent for a version change
@@ -24,9 +24,11 @@ function remoteRefs(item: Item, self: string): Ref[] {
   return refs;
 }
 
+// the target is its page when its document gave one, else its item document by its blyg's template: never a page
+// built from the f/ or t/ convention, which a receiver that doesn't serve them refuses, correctly (§15.2, #85)
 async function targetPage(db: D1Database, ref: { origin: string; id: string }) {
-  const snap = await db.prepare("SELECT page, kind FROM snapshots WHERE origin = ? AND item_id = ?").bind(ref.origin, ref.id).first<{ page: string | null; kind: string }>();
-  return new URL(snap?.page ?? `${snap?.kind === "fragment" ? "f" : "t"}/${ref.id}/`, ref.origin).href;
+  const snap = await db.prepare("SELECT page FROM snapshots WHERE origin = ? AND item_id = ?").bind(ref.origin, ref.id).first<{ page: string | null }>();
+  return snap?.page ? new URL(snap.page, ref.origin).href : itemDocUrl(db, ref.origin, ref.id);
 }
 
 // Queue what a newly published version owes (new references, or ones whose target version changed;

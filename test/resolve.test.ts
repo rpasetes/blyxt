@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { resolve } from "../src/resolve";
+import { expand, itemUrl, PIN_TEMPLATE, resolve, templateOf } from "../src/resolve";
 
 type Route = { body: string; status?: number; finalUrl?: string };
 const MANIFEST = JSON.stringify({ blyg: "0.3", title: "B", site: "https://b.example/blyg/" });
@@ -65,4 +65,14 @@ test("plain RSS is legacy, nothing is failure with a trail", async () => {
 test("a JSON body without a blyg key is not a manifest", async () => {
   const { impl } = net({ "https://j.example/blyg.json": { body: `{"name":"x"}` } });
   expect((await resolve("https://j.example/", impl)).type).toBe("failed");
+});
+
+test("item and pin templates expand with encoded variables, keep their query, and resolve against the origin (§6.1)", () => {
+  const origin = "https://b.example/blyg/";
+  expect(itemUrl(origin, null, "0a000000000000000000000000")).toBe("https://b.example/blyg/items/0a000000000000000000000000.json");
+  expect(itemUrl(origin, "https://b.example/wp-json/items/{id}?format=json", "0a000000000000000000000000")).toBe("https://b.example/wp-json/items/0a000000000000000000000000?format=json");
+  expect(expand(PIN_TEMPLATE, { id: "x y", n: 3 }, origin)).toBe("https://b.example/blyg/items/x%20y/v3.json");
+  expect(templateOf("items/{id}", "id")).toBe("items/{id}");
+  expect(templateOf("items/", "id")).toBeNull();
+  expect(templateOf(42, "id")).toBeNull();
 });

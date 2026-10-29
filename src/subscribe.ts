@@ -1,6 +1,6 @@
 // Read side of the Sub topic: subscriptions and polling (spec §12.3, §13).
 import { contentHash, ID_RE, now } from "./blyg";
-import { USER_AGENT, type Manifest } from "./resolve";
+import { itemUrl, parseManifest, templateOf, USER_AGENT, type Manifest } from "./resolve";
 import { parseFeed, syntheticId, type LegacyEntry } from "./rss";
 import { sanitize } from "./sanitize";
 import { decode, toTelegramHtml, type QuoteLink } from "./tghtml";
@@ -21,6 +21,10 @@ export type Subscription = {
   lossy: number;
   // 1 for a plain RSS/Atom feed (L0); origin and index_url are then the feed URL
   legacy: number;
+  // the manifest's item and pin templates (§6.1), null for the defaults, and when the manifest was last read
+  item_tpl?: string | null;
+  pin_tpl?: string | null;
+  manifest_checked?: string | null;
 };
 
 type Imported = {
@@ -52,6 +56,8 @@ const MAX_MESSAGE = 3500;
 // already-seen items refetched per poll run, oldest check first, to catch stealth edits (§13.3)
 const SWEEP = 3;
 const RECHECK_HOURS = 6;
+// a followed blyg's manifest is re-read this often, so a blyg that moves its surface is followed there (§6.1)
+const MANIFEST_HOURS = 24;
 // a Sub message this recent is still near the bottom of its topic, so an edit to it is seen without a reply
 const FRESH_MINUTES = 60;
 
@@ -152,8 +158,9 @@ async function fetchFeed(url: string, etag?: string | null): Promise<IndexResult
   return { status: "ok", items: [...latest.values()], etag: res.headers.get("etag") };
 }
 
-async function fetchItem(origin: string, id: string): Promise<ItemDoc | null> {
-  const res = await get(new URL(`items/${id}.json`, origin).href);
+// an item document, where the blyg's manifest says it lives (§6.1, §12)
+async function fetchItem(s: Pick<Subscription, "origin" | "item_tpl">, id: string): Promise<ItemDoc | null> {
+  const res = await get(itemUrl(s.origin, s.item_tpl, id));
   if (!res.ok) return null;
   try {
     const doc = (await res.json()) as ItemDoc;
@@ -163,12 +170,39 @@ async function fetchItem(origin: string, id: string): Promise<ItemDoc | null> {
   }
 }
 
+// where a manifest says a blyg's surface lives (§6.1): feed and items authoritative, item and pin as templates
+function surface(manifest: Manifest, origin: string) {
+  return {
+    indexUrl: new URL(typeof manifest.items === "string" ? manifest.items : "items/index.json", origin).href,
+    feedUrl: new URL(typeof manifest.feed === "string" ? manifest.feed : "feed.xml", origin).href,
+    itemTpl: templateOf(manifest.item, "id"),
+    pinTpl: templateOf(manifest.pin, "id", "n"),
+  };
+}
+
+// Re-read a followed blyg's manifest and follow its surface where it now says it lives. A manifest that can't
+// be read leaves everything as it was until the next check: a missing manifest is the poll's problem, not this one's
+async function refreshManifest(db: D1Database, s: Subscription): Promise<Subscription> {
+  const at = now();
+  const res = await get(new URL("blyg.json", s.origin).href).catch(() => null);
+  const manifest = res?.ok ? parseManifest(await res.text()) : null;
+  if (!manifest) {
+    await db.prepare("UPDATE subscriptions SET manifest_checked = ? WHERE origin = ?").bind(at, s.origin).run();
+    return { ...s, manifest_checked: at };
+  }
+  const { indexUrl, feedUrl, itemTpl, pinTpl } = surface(manifest, s.origin);
+  // a moved index starts without an ETag: the old one named other bytes
+  const etag = indexUrl === s.index_url ? s.index_etag : null;
+  await db.prepare("UPDATE subscriptions SET index_url = ?, feed_url = ?, item_tpl = ?, pin_tpl = ?, index_etag = ?, manifest_checked = ? WHERE origin = ?")
+    .bind(indexUrl, feedUrl, itemTpl, pinTpl, etag, at, s.origin).run();
+  return { ...s, index_url: indexUrl, feed_url: feedUrl, item_tpl: itemTpl, pin_tpl: pinTpl, index_etag: etag, manifest_checked: at };
+}
+
 // Subscribing baselines every current item without posting it, then shows the newest one.
 // A blyg another topic already follows keeps its fetch state; this topic gets its own watermarks.
 export async function addSubscription(db: D1Database, sub: Sub, origin: string, manifest: Manifest, topicName = "Sub") {
   const title = (typeof manifest.title === "string" && manifest.title.trim()) || new URL(origin).host;
-  const indexUrl = new URL(typeof manifest.items === "string" ? manifest.items : "items/index.json", origin).href;
-  const feedUrl = new URL(typeof manifest.feed === "string" ? manifest.feed : "feed.xml", origin).href;
+  const { indexUrl, feedUrl, itemTpl, pinTpl } = surface(manifest, origin);
   let index = await fetchIndex(indexUrl);
   const lossy = index.status === "missing";
   if (lossy) index = await fetchFeed(feedUrl);
@@ -177,8 +211,8 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
   const at = now();
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO sub_topics (topic_id, name, created) VALUES (?, ?, ?)").bind(sub.topicId, topicName, at),
-    db.prepare("INSERT OR IGNORE INTO subscriptions (origin, title, index_url, feed_url, lossy, index_etag, created, last_polled, next_poll) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(origin, title, indexUrl, feedUrl, lossy ? 1 : 0, index.etag, at, at, minutesFromNow(POLL_MINUTES)),
+    db.prepare("INSERT OR IGNORE INTO subscriptions (origin, title, index_url, feed_url, lossy, index_etag, created, last_polled, next_poll, item_tpl, pin_tpl, manifest_checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(origin, title, indexUrl, feedUrl, lossy ? 1 : 0, index.etag, at, at, minutesFromNow(POLL_MINUTES), itemTpl, pinTpl, at),
     db.prepare("INSERT INTO follows (topic_id, origin, created) VALUES (?, ?, ?)").bind(sub.topicId, origin, at),
     ...index.items.map((i) =>
       db.prepare("INSERT OR IGNORE INTO imported (topic_id, origin, item_id, version, kind) VALUES (?, ?, ?, ?, ?)").bind(sub.topicId, origin, i.id, i.version, i.kind),
@@ -187,9 +221,9 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
 
   const newest = index.items.find((i) => i.kind !== "withdrawn");
   if (newest) {
-    const doc = await fetchItem(origin, newest.id);
+    const doc = await fetchItem({ origin, item_tpl: itemTpl }, newest.id);
     // the preview is a courtesy; if Telegram is busy the next new item shows up anyway
-    if (doc) await present(db, sub, { origin, title }, doc, { topic_id: sub.topicId, item_id: doc.id, version: 0, kind: doc.kind, content_hash: null, tg_message_id: null }).catch(() => {});
+    if (doc) await present(db, sub, { origin, title, item_tpl: itemTpl }, doc, { topic_id: sub.topicId, item_id: doc.id, version: 0, kind: doc.kind, content_hash: null, tg_message_id: null }).catch(() => {});
   }
   return { title, count: index.items.length, lossy };
 }
@@ -197,9 +231,10 @@ export async function addSubscription(db: D1Database, sub: Sub, origin: string, 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 // Sub messages show the rendered item (content_html), so baked quotes read as quotes, not ![[id]] directives
-export function messageText(title: string, origin: string, doc: ItemDoc, quoteLinks?: Map<string, QuoteLink>) {
+// The post's link is its page as its document gives it, else its item document (itemTpl: the blyg's template)
+export function messageText(title: string, origin: string, doc: ItemDoc, quoteLinks?: Map<string, QuoteLink>, itemTpl?: string | null) {
   if (doc.kind === "withdrawn") return `<b>${esc(title)}</b> · withdrawn`;
-  const link = new URL(doc.page ?? `${doc.kind === "thread" ? "t" : "f"}/${doc.id}/`, origin).href;
+  const link = doc.page ? new URL(doc.page, origin).href : itemUrl(origin, itemTpl, doc.id);
   const body = toTelegramHtml(doc.content_html ?? "", origin, MAX_MESSAGE, quoteLinks && ((q) => quoteLinks.get(`${q.origin} ${q.id}`) ?? null));
   // a stub names what it responds to up top, where a long quote can't push it out of the message
   const responds = respondsTo(doc, origin, quoteLinks);
@@ -214,7 +249,7 @@ function respondsTo(doc: ItemDoc, origin: string, quoteLinks?: Map<string, Quote
     if (!stub.id || !ID_RE.test(stub.id)) return null;
     const from = stub.origin ?? origin;
     const known = quoteLinks?.get(`${from} ${stub.id}`);
-    const url = stub.cited?.url ?? known?.url ?? new URL(`items/${stub.id}.json`, from).href;
+    const url = stub.cited?.url ?? known?.url ?? itemUrl(from, null, stub.id);
     return `<a href="${esc(new URL(url).href)}">${esc(stub.cited?.source ?? known?.label ?? new URL(from).host)}</a>`;
   } catch {
     return null;
@@ -222,7 +257,7 @@ function respondsTo(doc: ItemDoc, origin: string, quoteLinks?: Map<string, Quote
 }
 
 // each quote baked into a post links to what it quotes, like a citation under it: the page as blyxt last read it,
-// else the reference convention for a kind it knows, else the item document, which every blyg serves
+// else the item document by its blyg's template, which every blyg serves (never a guessed f/ or t/ path)
 export async function quoteLinks(db: D1Database, html: string, origin: string, stub?: ItemDoc["stub_of"]) {
   const links = new Map<string, QuoteLink>();
   const refs = [...html.matchAll(/<blockquote\b[^>]*\bdata-blyg-id="[^"]*"[^>]*>/g)].map(([tag]) => ({
@@ -236,12 +271,11 @@ export async function quoteLinks(db: D1Database, html: string, origin: string, s
     if (links.has(key) || !ID_RE.test(id)) continue;
     const known = await db.prepare(
       `SELECT (SELECT title FROM subscriptions WHERE origin = ?1) AS title,
-              (SELECT page FROM snapshots WHERE origin = ?1 AND item_id = ?2) AS page,
-              (SELECT kind FROM imported WHERE origin = ?1 AND item_id = ?2 AND kind != 'withdrawn' LIMIT 1) AS kind`,
-    ).bind(from, id).first<{ title: string | null; page: string | null; kind: string | null }>();
-    const path = known?.page ?? (known?.kind ? `${known.kind === "thread" ? "t" : "f"}/${id}/` : `items/${id}.json`);
+              (SELECT item_tpl FROM subscriptions WHERE origin = ?1) AS item_tpl,
+              (SELECT page FROM snapshots WHERE origin = ?1 AND item_id = ?2) AS page`,
+    ).bind(from, id).first<{ title: string | null; item_tpl: string | null; page: string | null }>();
     let url: string;
-    try { url = new URL(path, from).href; } catch { continue; }
+    try { url = known?.page ? new URL(known.page, from).href : itemUrl(from, known?.item_tpl, id); } catch { continue; }
     links.set(key, { url, label: known?.title ?? new URL(from).host });
   }
   return links;
@@ -269,8 +303,8 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
 // Show a document in the Sub topic: a new message for a new item, an edit for a later version.
 // Edits don't move a message, so a later version of an older post also gets a reply under it,
 // and a burst of versions keeps editing that one reply while it's fresh.
-async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title">, doc: ItemDoc, row: Imported | undefined, text?: string) {
-  text ??= messageText(s.title, s.origin, doc, await quoteLinks(db, doc.content_html ?? "", s.origin, doc.stub_of));
+async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title" | "item_tpl">, doc: ItemDoc, row: Imported | undefined, text?: string) {
+  text ??= messageText(s.title, s.origin, doc, await quoteLinks(db, doc.content_html ?? "", s.origin, doc.stub_of), s.item_tpl);
   let messageId = row?.tg_message_id ?? null;
   let postedAt = row?.posted_at ?? null;
   let replyId = row?.reply_message_id ?? null;
@@ -420,7 +454,7 @@ async function sweep(db: D1Database, bot: Bot, budget: { left: number }) {
   ).bind(minutesFromNow(-RECHECK_HOURS * 60), Math.min(SWEEP, budget.left)).all<Subscription & { item_id: string }>();
   for (const { item_id, ...s } of results) {
     budget.left--;
-    const doc = await fetchItem(s.origin, item_id);
+    const doc = await fetchItem(s, item_id);
     if (!doc) {
       await db.prepare("UPDATE imported SET checked_at = ? WHERE origin = ? AND item_id = ?").bind(now(), s.origin, item_id).run();
       continue;
@@ -434,6 +468,10 @@ async function sweep(db: D1Database, bot: Bot, budget: { left: number }) {
 // Every changed item is fetched once, however many topics show it.
 async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left: number }) {
   if (s.legacy) return pollLegacy(db, bot, s, budget);
+  if (!s.manifest_checked || s.manifest_checked < minutesFromNow(-MANIFEST_HOURS * 60)) {
+    budget.left--;
+    s = await refreshManifest(db, s);
+  }
   budget.left--;
   // while lossy, the stored ETag is the feed's
   let index = await fetchIndex(s.index_url, s.lossy ? null : s.index_etag);
@@ -464,7 +502,7 @@ async function pollOne(db: D1Database, bot: Bot, s: Subscription, budget: { left
   for (const entry of changed) {
     if (budget.left <= 0) { complete = false; break; }
     budget.left--;
-    const doc = await fetchItem(s.origin, entry.id);
+    const doc = await fetchItem(s, entry.id);
     if (!doc) { complete = false; continue; }
     const result = await applyDoc(db, bot, s, doc, topics, seen, entry.version);
     if (result === "pending") complete = false;

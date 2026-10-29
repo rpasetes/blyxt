@@ -251,3 +251,40 @@ test("a stub's Sub message names what it responds to above the quote", async () 
   });
   expect(text).toStartWith('<b>Them</b>\n↩ in response to <a href="https://other.example/t/1tnzdzm19wq64aqb3dm5verwyr/">Other &amp; Co</a>\n\nhi');
 });
+
+// a blyg whose software can't serve fixed .json paths: its manifest says where everything lives (§6.1)
+test("a manifest's item template is where blyxt fetches items, and a re-read manifest moves it", async () => {
+  const db = d1();
+  const WP = "https://b.example/wp-json/blyg/v1/";
+  let manifest: Record<string, unknown> = { blyg: "0.4", title: "B", items: `${WP}items?format=json`, feed: `${WP}feed`, item: `${WP}items/{id}?format=json`, pin: `${WP}items/{id}/v{n}` };
+  let version = 1;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("https://api.telegram.org/")) return Response.json({ ok: true, result: { message_id: JSON.parse(String(init?.body)).message_id ?? 100 } });
+    fetched.push(url);
+    if (url === ORIGIN + "blyg.json") return Response.json(manifest);
+    if (url === `${WP}items?format=json`) return Response.json({ items: [{ id: A, kind: "fragment", version }] });
+    const id = url.match(/items\/(\w{26})(?:\.json)?\?/)?.[1] ?? url.match(/\/(\w{26})$/)?.[1];
+    if (id === A && (url.startsWith(WP) || url.startsWith("https://b.example/api/"))) return Response.json({ id: A, kind: "fragment", version, content_html: `<p>v${version}</p>` });
+    return new Response("nope", { status: 404 });
+  }) as typeof fetch;
+
+  await addSubscription(db, { ...BOT, topicId: 3 }, ORIGIN, manifest as typeof MANIFEST);
+  expect(fetched).toContain(`${WP}items/${A}?format=json`);
+  expect(fetched.some((u) => u.startsWith(`${ORIGIN}items/`))).toBe(false);
+  expect(db.sqlite.query("SELECT item_tpl, pin_tpl FROM subscriptions").get()).toEqual({ item_tpl: `${WP}items/{id}?format=json`, pin_tpl: `${WP}items/{id}/v{n}` });
+
+  // a day later the blyg has moved its surface; the next poll re-reads the manifest and follows it
+  manifest = { ...manifest, items: "https://b.example/api/index", item: "https://b.example/api/{id}" };
+  globalThis.fetch = ((orig) => (async (input: string | URL | Request, init?: RequestInit) =>
+    String(input) === "https://b.example/api/index" ? Response.json({ items: [{ id: A, kind: "fragment", version }] }) : orig(input, init)) as typeof fetch)(globalThis.fetch);
+  version = 2;
+  db.sqlite.exec("UPDATE subscriptions SET manifest_checked = '2026-01-01T00:00:00Z'");
+  due(db);
+  fetched.length = 0;
+  await pollDue(db, BOT);
+  expect(fetched).toContain(`https://b.example/api/${A}`);
+  expect(db.sqlite.query("SELECT index_url, item_tpl FROM subscriptions").get()).toEqual({ index_url: "https://b.example/api/index", item_tpl: "https://b.example/api/{id}" });
+  expect(db.sqlite.query("SELECT version FROM imported").get()).toEqual({ version: 2 });
+});

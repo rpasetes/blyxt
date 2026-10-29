@@ -1,7 +1,31 @@
 // Resolution: from a shared URL to a blyg subscription (spec §12).
 export const USER_AGENT = "blyxt/0.1.0 (+https://github.com/rpasetes/blyxt)";
 
-export type Manifest = { blyg: string; site?: string; title?: string; feed?: string; items?: string; [k: string]: unknown };
+export type Manifest = { blyg: string; site?: string; title?: string; feed?: string; items?: string; item?: string; pin?: string; [k: string]: unknown };
+
+// The manifest locates the surface (§6.1): item and pin are RFC 6570 level-1 templates for where a blyg's
+// documents live, defaulting to these. A value may carry a query string, because it is expanded and then
+// fetched, never resolved against; a relative one is relative to the origin
+export const ITEM_TEMPLATE = "items/{id}.json";
+export const PIN_TEMPLATE = "items/{id}/v{n}.json";
+
+export function expand(template: string, vars: Record<string, string | number>, origin: string) {
+  return new URL(template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? encodeURIComponent(String(vars[k])) : m)), origin).href;
+}
+
+// a blyg's item document, by its own template when it has one
+export const itemUrl = (origin: string, template: string | null | undefined, id: string) => expand(template || ITEM_TEMPLATE, { id }, origin);
+
+// a manifest's template, kept only when it is a string naming its variables (else the default applies)
+export const templateOf = (value: unknown, ...vars: string[]) =>
+  typeof value === "string" && value.trim() && vars.every((v) => value.includes(`{${v}}`)) ? value.trim() : null;
+
+// the item document of a post at any origin: through the template of a blyg blyxt follows, else the default.
+// This is a post's one mentionable address when its page isn't known (§15.2): never a guessed f/ or t/ path
+export async function itemDocUrl(db: D1Database, origin: string, id: string) {
+  const sub = await db.prepare("SELECT item_tpl FROM subscriptions WHERE origin = ?").bind(origin).first<{ item_tpl: string | null }>();
+  return itemUrl(origin, sub?.item_tpl, id);
+}
 
 export type Resolved =
   | { type: "blyg"; origin: string; manifest: Manifest; warnings: string[] }

@@ -3,6 +3,7 @@
 import { $ } from "bun";
 import config from "../wrangler.jsonc";
 import { messageText, quoteLinks } from "../src/subscribe";
+import { itemUrl } from "../src/resolve";
 import { remoteD1 } from "./remote-d1";
 import { tg } from "../src/telegram";
 
@@ -15,16 +16,17 @@ const query = async <T>(sql: string) => {
   return (Array.isArray(out) ? out[0] : out).results as T[];
 };
 
-const titles = new Map((await query<{ origin: string; title: string }>("SELECT origin, title FROM subscriptions")).map((s) => [s.origin, s.title]));
+const subs = new Map((await query<{ origin: string; title: string; item_tpl: string | null }>("SELECT origin, title, item_tpl FROM subscriptions")).map((s) => [s.origin, s]));
 const rows = await query<{ origin: string; item_id: string; tg_message_id: number }>("SELECT origin, item_id, tg_message_id FROM imported WHERE tg_message_id IS NOT NULL");
 
 for (const row of rows) {
-  const res = await fetch(new URL(`items/${row.item_id}.json`, row.origin));
+  const sub = subs.get(row.origin);
+  const res = await fetch(itemUrl(row.origin, sub?.item_tpl, row.item_id));
   if (!res.ok) { console.log(`${row.item_id}: ${res.status}, skipped`); continue; }
   const doc = (await res.json()) as Parameters<typeof messageText>[2];
   // only messages with quotes gain anything from quote links; the rest re-render as before
   const links = doc.content_html?.includes("data-blyg-id") || doc.stub_of ? await quoteLinks(remoteD1, doc.content_html ?? "", row.origin, doc.stub_of) : undefined;
-  const text = messageText(titles.get(row.origin) ?? row.origin, row.origin, doc, links);
+  const text = messageText(sub?.title ?? row.origin, row.origin, doc, links, sub?.item_tpl);
   const body = { chat_id: chatId, message_id: row.tg_message_id, text, parse_mode: "HTML", link_preview_options: { is_disabled: true } };
   let edited = await tg(token, "editMessageText", body);
   // groups take about 20 messages a minute; wait out a 429 once

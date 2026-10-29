@@ -1,5 +1,6 @@
 // Publish-time resolution of a message's markdown (§10.1–10.2): what it links and what it quotes.
 import { directives, excerpt, linkIds, now, pagePath, render, textContent, type Link, type LinkTarget, type Snapshot, type StubOf, type Transclusion } from "./blyg";
+import { itemUrl } from "./resolve";
 import { getItem } from "./store";
 
 export type Composed =
@@ -63,14 +64,15 @@ async function resolveQuote(db: D1Database, origin: string, id: string, self?: s
 
   // L0 rows never match: their ids aren't blyg ids (§13.6)
   const { results } = await db.prepare(
-    `SELECT s.origin, s.version, s.kind, s.content_html, s.page, s.author, s.fetched, sub.title
+    `SELECT s.origin, s.version, s.kind, s.content_html, s.page, s.author, s.fetched, sub.title, sub.item_tpl
      FROM snapshots s JOIN subscriptions sub ON sub.origin = s.origin AND sub.legacy = 0 WHERE s.item_id = ?`,
-  ).bind(id).all<{ origin: string; version: number; kind: string; content_html: string; page: string | null; author: string | null; fetched: string; title: string }>();
+  ).bind(id).all<{ origin: string; version: number; kind: string; content_html: string; page: string | null; author: string | null; fetched: string; title: string; item_tpl: string | null }>();
   if (results.length > 1) return `![[${id}]] matches posts in ${results.length} blygs you follow; the spec won't pick one`;
   const snap = results[0];
   if (snap?.kind === "withdrawn") return `![[${id}]] is withdrawn at ${snap.title}`;
   if (snap) {
-    const page = new URL(snap.page ?? `${snap.kind === "thread" ? "t" : "f"}/${id}/`, snap.origin).href;
+    // the cited url is the page its document gave, else its item document (§5.9): never a guessed f/ or t/ path
+    const page = snap.page ? new URL(snap.page, snap.origin).href : itemUrl(snap.origin, snap.item_tpl, id);
     return {
       version: snap.version,
       html: snap.content_html,
@@ -134,14 +136,15 @@ async function resolveLink(db: D1Database, origin: string, id: string): Promise<
   if (local) return `[[${id}]] is withdrawn`;
 
   const { results } = await db
-    .prepare(`SELECT i.origin, MAX(s.page) AS page FROM imported i LEFT JOIN snapshots s ON s.origin = i.origin AND s.item_id = i.item_id
+    .prepare(`SELECT i.origin, MAX(s.page) AS page, MAX(sub.item_tpl) AS item_tpl FROM imported i
+      LEFT JOIN snapshots s ON s.origin = i.origin AND s.item_id = i.item_id LEFT JOIN subscriptions sub ON sub.origin = i.origin
       WHERE i.item_id = ? AND i.kind NOT IN ('withdrawn', 'l0') GROUP BY i.origin`)
     .bind(id)
-    .all<{ origin: string; page: string | null }>();
+    .all<{ origin: string; page: string | null; item_tpl: string | null }>();
   if (results.length > 1) return `[[${id}]] matches posts in ${results.length} blygs you follow; the spec won't pick one`;
   if (results.length === 1) {
-    const { origin: from, page } = results[0];
-    return { url: new URL(page ?? `items/${id}.json`, from).href, label: id, origin: from };
+    const { origin: from, page, item_tpl } = results[0];
+    return { url: page ? new URL(page, from).href : itemUrl(from, item_tpl, id), label: id, origin: from };
   }
   return `[[${id}]] doesn't match a post here or in a blyg you follow`;
 }
