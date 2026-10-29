@@ -38,9 +38,10 @@ export type Cited = { source?: string; author?: string; excerpt?: string; url?: 
 // a stub's one target (§10.6): origin always, even our own, because a citation is absolute
 export type StubOf = { origin: string; id: string; version: number; cited?: Cited };
 
-// one machine-generated span's provenance (§5.7): own-origin sources at 0.3, never instruction text
+// one machine-generated span's provenance (§5.7), never instruction text. A source is a reference (§5.9):
+// origin omitted for our own posts, present for another blyg's (0.4), with its cited frozen when drawn on
 export type Generated = {
-  sources: { id: string; version: number }[];
+  sources: { id: string; version: number; origin?: string; cited?: Cited }[];
   model?: string;
   at?: string;
 };

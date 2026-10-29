@@ -53,7 +53,7 @@ export async function compose(db: D1Database, origin: string, src: string, self?
 
 // the publisher's own current snapshot (§10.2): a local post, else exactly one followed blyg's post as last read.
 // Never a live fetch: quoting follows reading
-async function resolveQuote(db: D1Database, origin: string, id: string, self?: string): Promise<Snapshot | string> {
+export async function resolveQuote(db: D1Database, origin: string, id: string, self?: string): Promise<Snapshot | string> {
   if (id === self) return "a thread can't quote itself";
   const local = await getItem(db, id);
   if (local && local.kind !== "withdrawn") {

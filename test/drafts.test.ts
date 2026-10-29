@@ -109,8 +109,8 @@ test("a draft's provenance is checked before it reaches Pub", async () => {
   const calls = bot();
   const bad = async (body: unknown) => (await (await submit(db, body)).json() as { error: string }).error;
   expect(await bad({ content_md: "" })).toBe("content_md is required");
-  expect(await bad({ content_md: "x", generated: { sources: [{ id: "0000000000000000000000000u", version: 1 }] } })).toBe("each source is { id, version } of a post on this blyg");
-  expect(await bad({ content_md: "x", generated: { sources: [{ id: "00000000000000000000000000", version: 1 }] } })).toBe("00000000000000000000000000 v1 isn't a published version on this blyg");
+  expect(await bad({ content_md: "x", generated: { sources: [{ id: "0000000000000000000000000u", version: 1 }] } })).toBe("each source is { id, version } of a post here or in a blyg you follow");
+  expect(await bad({ content_md: "x", generated: { sources: [{ id: "00000000000000000000000000", version: 1 }] } })).toBe("source 00000000000000000000000000 doesn't match a post here or in a blyg you follow");
   expect(await bad({ content_md: "![[00000000000000000000000000]]\n\nsee", generated: {} })).toBe("a generated draft can't quote yet: blyxt marks the whole body as generated");
   expect(calls).toEqual([]);
 });
@@ -193,4 +193,39 @@ test("a draft sent with CRLF line endings is stored as LF, so it hashes the same
   const item = (await getItem(db, item_id))!;
   expect(item.content_md).toBe("one\ntwo\n\nthree");
   expect(item.content_hash).toBe(await contentHash("one\ntwo\n\nthree"));
+});
+
+test("a source from a followed blyg is disclosed with its origin and cited, and tells that blyg (§5.7, §15.4)", async () => {
+  const db = d1();
+  const THEM = "https://them.example/blyg/";
+  const POST = "47ejtj76c1j7j9b0adp6tr3cee";
+  db.sqlite.exec(`
+    INSERT INTO subscriptions (origin, title, index_url, created, next_poll, failures, lossy, legacy) VALUES ('${THEM}', 'Their Blyg', '${THEM}items/index.json', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 0, 0, 0);
+    INSERT INTO snapshots (origin, item_id, version, kind, content_html, page, author, fetched)
+      VALUES ('${THEM}', '${POST}', 3, 'thread', '<p>Their words.</p>', 't/${POST}/', 'Them', '2026-10-20T00:00:00Z');
+  `);
+  const calls = bot();
+  const bad = async (body: unknown) => (await (await submit(db, body)).json() as { error: string }).error;
+  expect(await bad({ content_md: "x", generated: { sources: [{ id: POST, version: 2 }] } })).toBe(`source ${POST} v2 isn't the version blyxt holds (v3)`);
+
+  expect((await submit(db, { content_md: "A summary of their words.", generated: { model: "m", sources: [{ id: POST, version: 3 }] } })).status).toBe(201);
+  const mentioned: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `${THEM}blyg.json`) return Response.json({ blyg: "0.4", webmention: "webmention" });
+    if (url === `${THEM}webmention`) { mentioned.push(String(init?.body)); return new Response("", { status: 202 }); }
+    if (url.startsWith("https://api.telegram.org/")) return Response.json({ ok: true, result: { message_id: 900 } });
+    return new Response("nope", { status: 404 });
+  }) as typeof fetch;
+  await command(db, "/publish", 500);
+  const { item_id } = db.sqlite.query("SELECT item_id FROM tg_messages WHERE message_id = 500").get() as { item_id: string };
+  const doc = itemDocument(SITE, (await getItem(db, item_id))!, await changelog(db, item_id));
+  expect(doc.generated[0].sources).toEqual([{
+    origin: THEM, id: POST, version: 3,
+    cited: { source: "Their Blyg", author: "Them", excerpt: "Their words.", url: `${THEM}t/${POST}/`, retrieved: "2026-10-20T00:00:00Z" },
+  }]);
+  // a source is never a transclusion: the two disclosures are disjoint (§5.7)
+  expect("transclusions" in doc).toBe(false);
+  expect(db.sqlite.query("SELECT relation, target_version, status FROM mentions_out").all()).toEqual([{ relation: "source", target_version: 3, status: "sent" }]);
+  expect(mentioned).toHaveLength(1);
 });

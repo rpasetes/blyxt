@@ -1,6 +1,6 @@
 // Sends a markdown file to Pub as a draft; it publishes only when you reply /publish to it there.
 //   bun run draft <file.md> [--generated-by <model>] [--source <id>@v<n> ...] [--update <id|link> [--note <text>] [--note-generated]]
-// --generated-by marks the whole body machine-generated (§5.7); --source names a post of this blyg it drew on.
+// --generated-by marks the whole body machine-generated (§5.7); --source names a post it drew on: yours, or a followed blyg's at the version blyxt holds, which tells that blyg.
 // --update makes it a revision draft: publishing it makes that post's next version, with --note in its changelog
 // (--note-generated when the client wrote the note, not the author, §5.2).
 // Needs DRAFT_TOKEN (e.g. in .dev.vars); BLYXT_URL defaults to the deployed Worker.

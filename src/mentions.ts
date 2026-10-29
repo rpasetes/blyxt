@@ -1,11 +1,11 @@
 // Outbound Webmention (§15.2): telling another blyg it was stubbed or quoted. Fire-and-forget: a publish
 // never waits on it, failures retry from the cron with backoff, and the outcome is information, never an error.
-import { now, pagePath, type Item, type Link, type Site, type StubOf, type Transclusion } from "./blyg";
+import { now, pagePath, type Generated, type Item, type Link, type Site, type StubOf, type Transclusion } from "./blyg";
 import { itemDocUrl, USER_AGENT } from "./resolve";
 import { lastStub } from "./store";
 
 // a link names a page, not a version (§10.3a): its version is 0, so it is sent once and never re-sent for a version change
-type Ref = { origin: string; id: string; version: number; relation: "stub" | "transclusion" | "link" };
+type Ref = { origin: string; id: string; version: number; relation: "stub" | "transclusion" | "source" | "link" };
 type Row = { item_id: string; target_origin: string; target_id: string; target_version: number; relation: string; source: string; target: string; status: string; attempts: number };
 
 // RECOMMENDED retry schedule, in minutes, then abandoned (§15.2)
@@ -13,13 +13,16 @@ const BACKOFF = [15, 60, 240, 720, 1440];
 const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 // a post's references to other origins, one per target, strongest relation first: its stub target, every quote
-// carrying an origin, then every link carrying one (a notice, never a response: §15.4, §15.5)
+// carrying an origin, every generation source carrying one (§5.7: the words it carries, transformed), then every
+// link carrying one (a notice, never a response: §15.4, §15.5). A 0.3 receiver fails a source or link mention,
+// which is right for it: the outcome is recorded, never an error of ours
 function remoteRefs(item: Item, self: string): Ref[] {
   const refs: Ref[] = [];
   const add = (ref: Ref) => { if (ref.origin !== self && !refs.some((r) => r.origin === ref.origin && r.id === ref.id)) refs.push(ref); };
   const stub = item.stub_of ? (JSON.parse(item.stub_of) as StubOf) : null;
   if (stub) add({ origin: stub.origin, id: stub.id, version: stub.version, relation: "stub" });
   for (const t of JSON.parse(item.transclusions ?? "[]") as Transclusion[]) if (t.origin) add({ origin: t.origin, id: t.id, version: t.version, relation: "transclusion" });
+  for (const g of JSON.parse(item.generated ?? "[]") as Generated[]) for (const src of g.sources) if (src.origin) add({ origin: src.origin, id: src.id, version: src.version, relation: "source" });
   for (const l of JSON.parse(item.links ?? "[]") as Link[]) if (l.origin) add({ origin: l.origin, id: l.id, version: 0, relation: "link" });
   return refs;
 }

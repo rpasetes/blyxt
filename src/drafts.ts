@@ -1,7 +1,7 @@
 // Drafts from other clients: POST /api/drafts puts a draft in Pub, and only the owner's /publish there
 // makes it an item. Telegram stays the point of publish; a leaked token can only propose.
 import { directives, FRAGMENT_CAP, ID_RE, newId, now, overCap, pagePath, type Generated, type Item, type Site } from "./blyg";
-import { compose } from "./compose";
+import { compose, resolveQuote } from "./compose";
 import { getItem } from "./store";
 import { tg, type Config } from "./telegram";
 import { toTelegramHtml } from "./tghtml";
@@ -43,7 +43,7 @@ function authorized(req: Request, token: string) {
 
 // a draft's provenance keeps only what §5.7 discloses: sources, model, at. Anything else (a prompt,
 // instructions) is studio-private and is dropped, never published
-async function provenance(db: D1Database, input: unknown): Promise<Generated | string> {
+async function provenance(db: D1Database, origin: string, input: unknown): Promise<Generated | string> {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return "generated must be an object: { model?, at?, sources? }";
   const { model, at, sources = [] } = input as Record<string, unknown>;
   if (model !== undefined && (typeof model !== "string" || !model.trim() || model.length > 100)) return "generated.model must be a short string";
@@ -51,11 +51,21 @@ async function provenance(db: D1Database, input: unknown): Promise<Generated | s
   if (!Array.isArray(sources)) return "generated.sources must be an array of { id, version }";
   const named: Generated["sources"] = [];
   for (const s of sources as Record<string, unknown>[]) {
-    // own-origin only at 0.3 (§5.7): a source is an exact published version of one of this blyg's posts
-    if (typeof s?.id !== "string" || !ID_RE.test(s.id) || !Number.isInteger(s.version)) return "each source is { id, version } of a post on this blyg";
-    const v = await db.prepare("SELECT kind FROM versions WHERE item_id = ? AND version = ?").bind(s.id, s.version).first<{ kind: string }>();
-    if (!v || v.kind === "withdrawn") return `${s.id} v${s.version} isn't a published version on this blyg`;
-    named.push({ id: s.id, version: s.version as number });
+    // a source is an exact published version: of one of this blyg's posts, else (0.4) of a followed blyg's post as
+    // blyxt holds it, resolved like a directive: never a live fetch, and an ambiguous id is an error (§5.7, §10.2)
+    if (typeof s?.id !== "string" || !ID_RE.test(s.id) || !Number.isInteger(s.version)) return "each source is { id, version } of a post here or in a blyg you follow";
+    if (await getItem(db, s.id)) {
+      // a local id never falls through to an import (§10.2)
+      const v = await db.prepare("SELECT kind FROM versions WHERE item_id = ? AND version = ?").bind(s.id, s.version).first<{ kind: string }>();
+      if (!v || v.kind === "withdrawn") return `${s.id} v${s.version} isn't a published version on this blyg`;
+      named.push({ id: s.id, version: s.version as number });
+      continue;
+    }
+    const snap = await resolveQuote(db, origin, s.id);
+    if (typeof snap === "string") return snap.replace(`![[${s.id}]]`, `source ${s.id}`);
+    // what was fed to the generator is the version blyxt holds; naming another would disclose words it never had
+    if (snap.version !== s.version) return `source ${s.id} v${s.version} isn't the version blyxt holds (v${snap.version})`;
+    named.push({ origin: snap.origin!, id: s.id, version: snap.version, ...(snap.cited ? { cited: snap.cited } : {}) });
   }
   return { sources: named, ...(model ? { model: model.trim() } : {}), at: at ? new Date(at).toISOString().replace(/\.\d{3}Z$/, "Z") : now() };
 }
@@ -75,7 +85,7 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
 
   let generated: Generated | undefined;
   if (body!.generated !== undefined) {
-    const g = await provenance(db, body!.generated);
+    const g = await provenance(db, site.origin, body!.generated);
     if (typeof g === "string") return fail(400, g);
     generated = g;
     // blyxt marks the whole body as generated; a quote in it would be marked too, and it isn't generated
