@@ -100,7 +100,7 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   // a message too long for a fragment becomes a thread, which has no cap
   const long = !composed.thread && overCap(md);
   const kind = composed.thread || long ? "thread" : "fragment";
-  const item = await publishNew(db, kind, { md, html: composed.html, transclusions: composed.transclusions, stubOf: composed.stub }, { chatId: m.chat.id, messageId: m.message_id, prefix: prefix?.md });
+  const item = await publishNew(db, kind, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links, stubOf: composed.stub }, { chatId: m.chat.id, messageId: m.message_id, prefix: prefix?.md });
   return async () => {
     await mention(db, site, item);
     await reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${long ? ` (over ${FRAGMENT_CAP.toLocaleString("en")} characters)` : ""}${await stubNote(db, composed.stub, site, item.id)} → ${site.origin}${pagePath(item)}`);
@@ -204,7 +204,7 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (composed.thread && current?.authored_kind === "fragment") {
     return () => reply(cfg, m, "edit not published: a fragment can't quote. send it as a new message (or reply to the post you're quoting)");
   }
-  const edited = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions });
+  const edited = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links });
   if (!edited) {
     if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
     return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
@@ -297,7 +297,7 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
   const marked = generated ? " (marked machine-generated)" : "";
 
   if (draft.item_id) {
-    const c = { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, generated };
+    const c = { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated };
     const item = await revise(db, draft.item_id, draft.base_version!, c, draft.note, !!draft.note_generated);
     if (!item) {
       const now = await getItem(db, draft.item_id);
@@ -317,7 +317,7 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
   }
   const long = !composed.thread && overCap(draft.content_md);
   const kind = composed.thread || long ? "thread" : "fragment";
-  const item = await publishNew(db, kind, { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, generated, stubOf: composed.stub }, { chatId: m.chat.id, messageId: draft.message_id! });
+  const item = await publishNew(db, kind, { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated, stubOf: composed.stub }, { chatId: m.chat.id, messageId: draft.message_id! });
   await deleteDraft(db, draft.id);
   return async () => {
     await mention(db, site, item);
@@ -342,7 +342,7 @@ async function handleRepublish(m: TgMessage, id: string, note: string | null, db
   if (composed.thread && item.authored_kind === "fragment") return () => reply(cfg, m, "not republished: a fragment can't quote. edit out the ![[id]] line, then /republish again");
   if (item.authored_kind === "fragment" && overCap(md)) return () => reply(cfg, m, `not republished: fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters. trim the post, then /republish again`);
   const generated = last?.generated ? JSON.parse(last.generated) : undefined;
-  const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions, generated }, note);
+  const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated }, note);
   if (!next) return null;
   return async () => {
     await reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);

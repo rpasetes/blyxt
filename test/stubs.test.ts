@@ -182,3 +182,35 @@ test("images in a Sub message quote as the post's own text: their [image] labels
   expect(rows.map((r) => r.content_md)).toEqual([`![[${POST} | Their Blyg: Look at this.]]\n\nwhole`, `![[${POST} | Their Blyg: Look at this.]]\n> this.\n> Last\n\npart`]);
   expect(JSON.parse(rows[1].transclusions)[0].selector.exact).toBe("this.\nLast");
 });
+
+test("[[id]] links are disclosed in links[], in order, and a remote one sends a link mention (§10.3a)", async () => {
+  const db = followed();
+  const calls = network();
+  await pub(db, "my own post");
+  const own = only(db).id;
+  const msg = await pub(db, `see [[${POST}]], [[${own} | mine]] and [[${POST} | again]]`);
+  const id = (db.sqlite.query("SELECT id FROM items WHERE id != ?").get(own) as { id: string }).id;
+  const d = await doc(db, id);
+  expect(d.links).toEqual([{ id: POST, origin: THEM }, { id: own }, { id: POST, origin: THEM }]);
+  // the remote href is the page its document gave, not a guess
+  expect(d.content_html).toContain(`<a href="${THEM}t/${POST}/">${POST}</a>`);
+  expect(db.sqlite.query("SELECT relation, target, status FROM mentions_out").all()).toEqual([{ relation: "link", target: `${THEM}t/${POST}/`, status: "sent" }]);
+  expect(mentions(calls)).toHaveLength(1);
+  // a post with no links has no key, and neither does an endcap
+  expect("links" in (await doc(db, own))).toBe(false);
+  await pub(db, "/withdraw", { reply_to_message: { message_id: msg, chat: { id: -100 }, from: { id: 1 } } });
+  expect("links" in (await doc(db, id))).toBe(false);
+  // markdown links to blyg pages are the silent form: no entry
+  await pub(db, `[their post](${THEM}t/${POST}/)`);
+  const last = db.sqlite.query("SELECT links FROM items ORDER BY rowid DESC LIMIT 1").get();
+  expect(last).toEqual({ links: null });
+});
+
+test("a remote link with no known page points at the target's item document, never a guessed f/ or t/ path", async () => {
+  const db = followed();
+  network();
+  db.sqlite.run(`UPDATE snapshots SET page = NULL`);
+  await pub(db, `see [[${POST}]]`);
+  const d = await doc(db, only(db).id);
+  expect(d.content_html).toContain(`<a href="${THEM}items/${POST}.json">`);
+});

@@ -1,4 +1,4 @@
-import { contentHash, generatedBlock, newId, now, type AuthoredKind, type Generated, type Item, type Kind, type StubOf, type Transclusion, type Version } from "./blyg";
+import { contentHash, generatedBlock, newId, now, type AuthoredKind, type Generated, type Item, type Kind, type Link, type StubOf, type Transclusion, type Version } from "./blyg";
 
 export async function listItems(db: D1Database) {
   const { results } = await db.prepare("SELECT * FROM items ORDER BY updated DESC, id").all<Item>();
@@ -36,7 +36,8 @@ export const itemForMessage = (db: D1Database, chatId: number, messageId: number
 
 // what a publish event says; html and transclusions come from compose(), which resolves and bakes;
 // generated is the provenance of a machine-generated body (§5.7)
-export type Content = { md: string; html: string; transclusions: Transclusion[]; generated?: Generated[]; stubOf?: StubOf };
+// links are the [[id]] links compose() resolved (§10.3a)
+export type Content = { md: string; html: string; transclusions: Transclusion[]; links?: Link[]; generated?: Generated[]; stubOf?: StubOf };
 const EMPTY: Content = { md: "", html: "", transclusions: [] };
 
 // threads record their transclusions on every version; fragments never carry the key (§10.3)
@@ -49,6 +50,7 @@ function stubJson(stub: StubOf | null | undefined, c: Content) {
   return JSON.stringify(baked ? { ...stub, version: baked.version } : stub);
 }
 
+const linksOf = (c: Content) => (c.links?.length ? JSON.stringify(c.links) : null);
 const generatedOf = (c: Content) => (c.generated?.length ? JSON.stringify(c.generated) : null);
 // a generated body is marked in content_html too (§5.7)
 const htmlOf = (c: Content) => (c.generated?.length ? generatedBlock(c.html) : c.html);
@@ -69,12 +71,13 @@ export async function publishNew(db: D1Database, kind: AuthoredKind, c: Content,
     transclusions: transclusionsOf(kind, c),
     generated: generatedOf(c),
     stub_of: kind === "thread" && c.stubOf ? stubJson(c.stubOf, c) : null,
+    links: linksOf(c),
   };
   await db.batch([
-    db.prepare("INSERT INTO items (id, kind, authored_kind, created, updated, version, content_md, content_html, content_hash, transclusions, generated, stub_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, item.kind, item.authored_kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated, item.stub_of),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash, transclusions, generated, stub_of) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, 1, item.kind, at, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated, item.stub_of),
+    db.prepare("INSERT INTO items (id, kind, authored_kind, created, updated, version, content_md, content_html, content_hash, transclusions, generated, stub_of, links) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, item.kind, item.authored_kind, item.created, item.updated, item.version, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated, item.stub_of, item.links),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, content_md, content_html, content_hash, transclusions, generated, stub_of, links) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, 1, item.kind, at, item.content_md, item.content_html, item.content_hash, item.transclusions, item.generated, item.stub_of, item.links),
     db.prepare("INSERT INTO tg_messages (chat_id, message_id, item_id, prefix) VALUES (?, ?, ?, ?)")
       .bind(source.chatId, source.messageId, item.id, source.prefix ?? null),
   ]);
@@ -98,12 +101,14 @@ async function bump(db: D1Database, item: Item, kind: Kind, c: Content, note: st
     transclusions: transclusionsOf(item.authored_kind, c),
     generated: generatedOf(c),
     stub_of: stub ? stubJson(stub, c) : null,
+    // an endcap's content is EMPTY, so it carries none (§10.3a)
+    links: linksOf(c),
   };
   await db.batch([
-    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ?, transclusions = ?, generated = ?, stub_of = ? WHERE id = ? AND version = ?")
-      .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, next.stub_of, item.id, item.version),
-    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, note_generated, content_md, content_html, content_hash, transclusions, generated, stub_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(item.id, next.version, next.kind, at, note, note && noteGenerated ? 1 : 0, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, next.stub_of),
+    db.prepare("UPDATE items SET kind = ?, updated = ?, version = ?, content_md = ?, content_html = ?, content_hash = ?, transclusions = ?, generated = ?, stub_of = ?, links = ? WHERE id = ? AND version = ?")
+      .bind(next.kind, next.updated, next.version, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, next.stub_of, next.links, item.id, item.version),
+    db.prepare("INSERT INTO versions (item_id, version, kind, at, note, note_generated, content_md, content_html, content_hash, transclusions, generated, stub_of, links) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.id, next.version, next.kind, at, note, note && noteGenerated ? 1 : 0, next.content_md, next.content_html, next.content_hash, next.transclusions, next.generated, next.stub_of, next.links),
   ]);
   return next;
 }
@@ -169,7 +174,7 @@ export async function republish(db: D1Database, id: string, c: Content, note: st
   return bump(db, item, item.authored_kind, c, note);
 }
 
-export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string; transclusions: string | null; generated: string | null; stub_of: string | null };
+export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string; transclusions: string | null; generated: string | null; stub_of: string | null; links: string | null };
 
 // a pinned version's content, or null: unpinned history is never served (§8)
 export const getPinned = (db: D1Database, id: string, version: number) =>

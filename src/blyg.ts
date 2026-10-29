@@ -29,6 +29,8 @@ export type Item = {
   generated?: string | null;
   // threads only: JSON of the stub_of reference this version responds to, or null (§10.6)
   stub_of?: string | null;
+  // JSON of the links[] this version resolved from [[id]] links, or null when it has none (§10.3a)
+  links?: string | null;
 };
 
 // the human half of a citation, frozen when the reference was made (§5.9)
@@ -42,6 +44,9 @@ export type Generated = {
   model?: string;
   at?: string;
 };
+
+// a disclosed [[id]] link (§10.3a): a page, not a version, so no version, cited or selector; origin only for remote targets
+export type Link = { id: string; origin?: string };
 
 // a reference to the exact version a thread baked (§10.3); origin only for remote sources
 export type Transclusion = {
@@ -183,11 +188,11 @@ export function render(src: string, origin = "https://invalid./", links = new Ma
   }
 }
 
-// ids named by [[id]] links outside code
+// ids named by [[id]] links outside code, one per link in document order, repeats included (§10.3a)
 export function linkIds(src: string) {
-  const ids = new Set<string>();
-  md.walkTokens(lex(src).tokens, (t) => { if (t.type === "blygLink" && (t as LinkToken).live) ids.add((t as LinkToken).id); });
-  return [...ids];
+  const ids: string[] = [];
+  md.walkTokens(lex(src).tokens, (t) => { if (t.type === "blygLink" && (t as LinkToken).live) ids.push((t as LinkToken).id); });
+  return ids;
 }
 
 // transclusion directives outside code, in order (§10.1)
@@ -247,6 +252,8 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
     ...(item.stub_of && item.kind !== "withdrawn" ? { stub_of: JSON.parse(item.stub_of) } : {}),
     // omitted when the version involved no generation; an endcap never carries it (§5.7)
     ...(item.generated && item.kind !== "withdrawn" ? { generated: JSON.parse(item.generated) } : {}),
+    // omitted when the version has no [[id]] links; an endcap never carries it (§10.3a)
+    ...(item.links && item.kind !== "withdrawn" ? { links: JSON.parse(item.links) } : {}),
     changelog: changelog.map((c) => ({
       version: c.version,
       at: c.at,
@@ -258,7 +265,7 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
 }
 
 // items/{id}/v{n}.json: one pinned version, frozen (§8)
-export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions" | "generated" | "stub_of">) {
+export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions" | "generated" | "stub_of" | "links">) {
   return {
     blyg: "0.3",
     id: v.item_id,
@@ -277,6 +284,7 @@ export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" 
     ...(v.stub_of ? { stub_of: JSON.parse(v.stub_of) } : {}),
     // a citation includes its provenance (§5.7)
     ...(v.generated ? { generated: JSON.parse(v.generated) } : {}),
+    ...(v.links ? { links: JSON.parse(v.links) } : {}),
   };
 }
 

@@ -1,10 +1,10 @@
 // Publish-time resolution of a message's markdown (§10.1–10.2): what it links and what it quotes.
-import { type AuthoredKind, directives, excerpt, linkIds, now, pagePath, render, textContent, type LinkTarget, type Snapshot, type StubOf, type Transclusion } from "./blyg";
+import { directives, excerpt, linkIds, now, pagePath, render, textContent, type Link, type LinkTarget, type Snapshot, type StubOf, type Transclusion } from "./blyg";
 import { getItem } from "./store";
 
 export type Composed =
   // stub: the post a thread responds to, when it opens with a quote of it (§10.6)
-  | { ok: true; html: string; thread: boolean; transclusions: Transclusion[]; stub?: StubOf }
+  | { ok: true; html: string; thread: boolean; transclusions: Transclusion[]; links: Link[]; stub?: StubOf }
   | { ok: false; error: string };
 
 // self: the thread being edited, which may not quote itself, directly or through other local threads
@@ -31,17 +31,23 @@ export async function compose(db: D1Database, origin: string, src: string, self?
     transclusions.push(entry);
   }
 
-  const links = new Map<string, LinkTarget>();
+  // every [[id]] link resolves, and each is disclosed in links[], in order (§10.1, §10.3a)
+  const links = new Map<string, LinkTarget & { origin?: string }>();
+  const disclosed: Link[] = [];
   for (const id of linkIds(src)) {
-    const target = await resolveLink(db, origin, id);
-    if (typeof target === "string") return { ok: false, error: target };
-    links.set(id, target);
+    let target = links.get(id);
+    if (!target) {
+      const resolved = await resolveLink(db, origin, id);
+      if (typeof resolved === "string") return { ok: false, error: resolved };
+      links.set(id, (target = resolved));
+    }
+    disclosed.push(target.origin ? { id, origin: target.origin } : { id });
   }
   // a thread that opens with a quote responds to it: blyxt's stub gesture is the quote itself
   const first = found.length && /^!\[\[/.test(src.trimStart()) ? found[0] : undefined;
   const target = first && quotes.get(first.id)!;
   const stub = target ? { origin: target.origin ?? origin, id: first.id, version: target.version, ...(target.cited ? { cited: target.cited } : {}) } : undefined;
-  return { ok: true, html: render(src, origin, links, quotes), thread: found.length > 0, transclusions, ...(stub ? { stub } : {}) };
+  return { ok: true, html: render(src, origin, links, quotes), thread: found.length > 0, transclusions, links: disclosed, ...(stub ? { stub } : {}) };
 }
 
 // the publisher's own current snapshot (§10.2): a local post, else exactly one followed blyg's post as last read.
@@ -118,16 +124,24 @@ function select(text: string, selection: string): Transclusion["selector"] | nul
   return { exact: selection, ...(prefix ? { prefix } : {}), ...(suffix ? { suffix } : {}) };
 }
 
-// a local published item first, then exactly one followed blyg's item; anything else is a publish error
-async function resolveLink(db: D1Database, origin: string, id: string): Promise<LinkTarget | string> {
+// a local published item first, then exactly one followed blyg's item; anything else is a publish error.
+// A remote link's href is the target's page as its document gave it, else its item document: never a
+// guessed f/ or t/ path, which are presentation that blyg may not serve (§4, §15.2)
+async function resolveLink(db: D1Database, origin: string, id: string): Promise<(LinkTarget & { origin?: string }) | string> {
   const local = await getItem(db, id);
   if (local && local.kind !== "withdrawn") return { url: origin + pagePath(local), label: excerpt(local.content_md, 40) || id };
+  // a local id never falls through to an import (§10.2)
+  if (local) return `[[${id}]] is withdrawn`;
 
   const { results } = await db
-    .prepare("SELECT origin, MAX(kind) AS kind FROM imported WHERE item_id = ? AND kind != 'withdrawn' GROUP BY origin")
+    .prepare(`SELECT i.origin, MAX(s.page) AS page FROM imported i LEFT JOIN snapshots s ON s.origin = i.origin AND s.item_id = i.item_id
+      WHERE i.item_id = ? AND i.kind NOT IN ('withdrawn', 'l0') GROUP BY i.origin`)
     .bind(id)
-    .all<{ origin: string; kind: string }>();
+    .all<{ origin: string; page: string | null }>();
   if (results.length > 1) return `[[${id}]] matches posts in ${results.length} blygs you follow; the spec won't pick one`;
-  if (results.length === 1) return { url: new URL(pagePath({ id, authored_kind: results[0].kind as AuthoredKind }), results[0].origin).href, label: id };
+  if (results.length === 1) {
+    const { origin: from, page } = results[0];
+    return { url: new URL(page ?? `items/${id}.json`, from).href, label: id, origin: from };
+  }
   return `[[${id}]] doesn't match a post here or in a blyg you follow`;
 }
