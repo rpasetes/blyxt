@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { contentHash, directives, textContent, excerpt, feed, ID_RE, itemDocument, itemPage, linkIds, newId, pagePath, pinnedDocument, render, type Item, type Site } from "../src/blyg";
+import { contentHash, directives, textContent, excerpt, feed, ID_RE, itemDocument, itemPage, linkIds, manifest, newId, pagePath, pinnedDocument, render, type Item, type Site } from "../src/blyg";
 
 const site: Site = { origin: "https://example.com/blyg/", title: "t", subtitle: "s", author: { name: "a", url: "https://example.com/" } };
 const item: Item = {
@@ -27,7 +27,7 @@ test("page paths by authored kind", () => {
 
 test("item document carries the wire fields", () => {
   const doc = itemDocument(site, item, [{ item_id: item.id, version: 1, kind: "fragment", at: item.created, note: null, pinned: 0 }]);
-  expect(doc).toMatchObject({ blyg: "0.3", id: item.id, origin: site.origin, page: "f/7c9wk2mhq0v3xj8tn5rzfd41bg/", version: 1 });
+  expect(doc).toMatchObject({ blyg: "0.4", id: item.id, origin: site.origin, page: "f/7c9wk2mhq0v3xj8tn5rzfd41bg/", version: 1 });
   expect(doc.changelog).toEqual([{ version: 1, at: item.created, note: null }]);
 });
 
@@ -137,4 +137,11 @@ test("the live page cites only its pins", () => {
   const html = itemPage(site, { ...item, version: 3 }, [1]);
   expect(html).toContain('pinned: <a href="https://example.com/blyg/f/7c9wk2mhq0v3xj8tn5rzfd41bg/v1/">v1</a>');
   expect(html).not.toContain("v2");
+});
+
+test("documents declare 0.4; the manifest leaves item and pin out, since absent means the default (§6.1)", () => {
+  const m = manifest(site, "2026-10-29T00:00:00Z");
+  expect(m).toMatchObject({ blyg: "0.4", feed: "feed.xml", items: "items/index.json" });
+  expect("item" in m || "pin" in m).toBe(false);
+  expect(itemDocument(site, item, []).blyg).toBe("0.4");
 });

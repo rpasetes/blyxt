@@ -1,6 +1,6 @@
 # blyxt
 
-A Telegram client for [Blygger](https://blygger.org/spec/0.3/): write in a Telegram group, publish to a blyg.
+A Telegram client for [Blygger](https://blygger.org/spec/0.4/): write in a Telegram group, publish to a blyg.
 
 blyxt is both publisher and subscriber. It is one Cloudflare Worker that receives the Telegram webhook, keeps the blyg in D1, and serves every protocol surface directly — so a message is live as soon as it is sent. `rslantonie.com/blyg/*` is rewritten to the Worker by Vercel, which keeps the blyg's identity at `https://rslantonie.com/blyg/`.
 

@@ -1,5 +1,5 @@
-// Blygger 0.3 wire surface: ids, rendering, and the static documents.
-// Spec: https://blygger.org/spec/0.3/2026-09-28/
+// Blygger 0.4 wire surface: ids, rendering, and the static documents.
+// Spec: https://blygger.org/spec/0.4/ (living text: blygger/blygger-spec docs/protocol-v0.4.md)
 import { Marked, type Token, type Tokens } from "marked";
 import { decode } from "./tghtml";
 
@@ -219,7 +219,7 @@ export function excerpt(md: string, n = 80) {
 
 export function manifest(site: Site, updated: string) {
   return {
-    blyg: "0.3",
+    blyg: "0.4",
     level: 2,
     generator: "blyxt/0.1.0",
     generator_url: "https://github.com/rpasetes/blyxt",
@@ -234,7 +234,7 @@ export function manifest(site: Site, updated: string) {
 
 export function itemDocument(site: Site, item: Item, changelog: Version[]) {
   return {
-    blyg: "0.3",
+    blyg: "0.4",
     id: item.id,
     kind: item.kind,
     origin: site.origin,
@@ -268,7 +268,7 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
 // items/{id}/v{n}.json: one pinned version, frozen (§8)
 export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" | "content_html" | "content_hash" | "transclusions" | "generated" | "stub_of" | "links">) {
   return {
-    blyg: "0.3",
+    blyg: "0.4",
     id: v.item_id,
     kind: v.kind,
     version: v.version,
