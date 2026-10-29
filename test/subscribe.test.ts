@@ -10,7 +10,7 @@ const BOT = { token: "t", chatId: -100 };
 const MANIFEST = { blyg: "0.3", title: "B", items: "items/index.json" };
 
 // a followed blyg plus a Telegram that records every call
-function world(items: Record<string, { version: number; created: string; kind?: string }>) {
+function world(items: Record<string, { version: number; created: string; kind?: string; hash?: string }>) {
   const fetched: string[] = [];
   const telegram: { method: string; body: Record<string, unknown> }[] = [];
   let nextMessage = 100;
@@ -38,7 +38,7 @@ function world(items: Record<string, { version: number; created: string; kind?: 
       return Response.json({ items: Object.entries(items).map(([id, i]) => ({ id, kind: "fragment", ...i })) });
     }
     const id = url.match(/items\/(\w+)\.json$/)?.[1];
-    if (id && items[id]) return Response.json({ id, kind: items[id].kind ?? "fragment", version: items[id].version, content_html: `<p>${id} v${items[id].version}</p>` });
+    if (id && items[id]) return Response.json({ id, kind: items[id].kind ?? "fragment", version: items[id].version, content_html: `<p>${id} v${items[id].version}</p>`, ...(items[id].hash ? { content_hash: items[id].hash } : {}) });
     return new Response("nope", { status: 404 });
   }) as typeof fetch;
   return { items, fetched, telegram, goneTopics, deletedMessages };
@@ -191,7 +191,7 @@ test("/newsub creates and registers a topic; Pub and strangers can't run Sub com
 describe("later versions of an older Sub post", () => {
   const age = (db: ReturnType<typeof d1>, column: "posted_at" | "replied_at", minutes: number) =>
     db.sqlite.exec(`UPDATE imported SET ${column} = '${new Date(Date.now() - minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z")}' WHERE ${column} IS NOT NULL`);
-  const bump = async (db: ReturnType<typeof d1>, w: ReturnType<typeof world>, change: Partial<{ version: number; kind: string }> = {}) => {
+  const bump = async (db: ReturnType<typeof d1>, w: ReturnType<typeof world>, change: Partial<{ version: number; kind: string; hash: string }> = {}) => {
     Object.assign(w.items[A], { version: w.items[A].version + 1, ...change });
     w.telegram.length = 0;
     due(db);
@@ -217,6 +217,17 @@ describe("later versions of an older Sub post", () => {
     expect(w.telegram[1].body).toMatchObject({ message_thread_id: 3, text: expect.stringContaining(`${A} v2`) });
     expect(await bump(db, w)).toEqual([["editMessageText", 100], ["editMessageText", 101]]);
     expect(w.telegram[1].body.text).toContain(`${A} v3`);
+  });
+
+  test("after the hour, a version with the same words is maintenance: the original is edited, nothing resurfaces (§13.2)", async () => {
+    const db = d1();
+    const w = world({ [A]: { version: 1, created: "2026-10-01T00:00:00Z", hash: "sha256:same" } });
+    await addSubscription(db, { ...BOT, topicId: 3 }, ORIGIN, MANIFEST); // posts message 100
+    age(db, "posted_at", 61);
+    expect(await bump(db, w)).toEqual([["editMessageText", 100]]);
+    expect(db.sqlite.query("SELECT version FROM imported").get()).toEqual({ version: 2 });
+    // new words resurface as usual
+    expect(await bump(db, w, { hash: "sha256:new" })).toEqual([["editMessageText", 100], ["sendMessage", 100]]);
   });
 
   test("a reply older than the hour, or deleted, gets a new reply", async () => {

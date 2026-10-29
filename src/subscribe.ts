@@ -316,7 +316,8 @@ async function send(sub: Sub, method: string, body: Record<string, unknown>) {
 // Show a document in the Sub topic: a new message for a new item, an edit for a later version.
 // Edits don't move a message, so a later version of an older post also gets a reply under it,
 // and a burst of versions keeps editing that one reply while it's fresh.
-async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title" | "item_tpl">, doc: ItemDoc, row: Imported | undefined, text?: string) {
+// quiet: a maintenance version (§13.2) only updates the message already showing the post; it never resurfaces it
+async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" | "title" | "item_tpl">, doc: ItemDoc, row: Imported | undefined, text?: string, quiet = false) {
   text ??= messageText(s.title, s.origin, doc, await quoteLinks(db, doc.content_html ?? "", s.origin, doc.stub_of), s.item_tpl);
   let messageId = row?.tg_message_id ?? null;
   let postedAt = row?.posted_at ?? null;
@@ -327,7 +328,7 @@ async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" 
     const edited = await send(sub, "editMessageText", { chat_id: sub.chatId, message_id: messageId, text });
     // "not modified" means the message already shows this; anything else (deleted, too old) gets a fresh post
     if (!edited.ok && !edited.description?.includes("message is not modified")) messageId = replyId = repliedAt = null;
-    else if (!fresh(postedAt)) {
+    else if (!fresh(postedAt) && !quiet) {
       const reedited = replyId && fresh(repliedAt) && (await send(sub, "editMessageText", { chat_id: sub.chatId, message_id: replyId, text }));
       if (!reedited || (!reedited.ok && !reedited.description?.includes("message is not modified"))) {
         const replied = await send(sub, "sendMessage", {
@@ -342,7 +343,7 @@ async function present(db: D1Database, sub: Sub, s: Pick<Subscription, "origin" 
     }
   }
   // withdrawn content is never posted fresh (§13.4); there is nothing to show
-  if (!messageId && doc.kind !== "withdrawn") {
+  if (!messageId && doc.kind !== "withdrawn" && !quiet) {
     const sent = await send(sub, "sendMessage", { chat_id: sub.chatId, message_thread_id: sub.topicId, text });
     messageId = sent.ok ? (sent.result as { message_id: number }).message_id : null;
     postedAt = messageId ? now() : null;
@@ -389,8 +390,11 @@ async function applyDoc(db: D1Database, bot: Bot, s: Subscription, doc: ItemDoc,
           continue;
         }
       }
+      // a version whose words are the version before's is maintenance (a re-bake, a snapshot refresh, a
+      // metadata republish): it advances the watermark but SHOULD NOT resurface as new (§13.2, #77)
+      const maintenance = doc.version > (row?.version ?? 0) && !!row?.content_hash && row.content_hash === doc.content_hash;
       try {
-        await present(db, { ...bot, topicId }, s, doc, row);
+        await present(db, { ...bot, topicId }, s, doc, row, undefined, maintenance);
       } catch (e) {
         if (!(e instanceof TopicGone)) throw e;
         await removeSubTopic(db, topicId);
