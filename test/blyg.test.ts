@@ -80,6 +80,10 @@ test("a link's label is its anchor text; an empty label is none, and the label m
   expect(linkIds(`[[not an id | x]]`)).toEqual([]);
 });
 
+test("a caption reads a labelled link as its label", () => {
+  expect(excerpt(`see [[${A} | the opening fragment]] here`)).toBe("see the opening fragment here");
+});
+
 test("a directive's label bakes as data-blyg-label and changes nothing else (§10.2, #81)", () => {
   const quotes = new Map([[A, { version: 2, html: "<p>quoted</p>" }]]);
   const bare = render(`![[${A}]]\n\nmine`, site.origin, new Map(), quotes);

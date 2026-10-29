@@ -87,6 +87,19 @@ test("a message opening with a followed post's link stubs it, and edits keep the
   expect(mentions(calls)).toHaveLength(1);
 });
 
+test("an edit keeps the label its link was published with, even after the followed post changes", async () => {
+  const db = followed();
+  network();
+  const msg = await pub(db, `${THEM}t/${POST}/\nMy comments.`);
+  const { id } = only(db);
+  const label = "Their Blyg: This seems like an important piece so maybe we c…";
+  db.sqlite.run(`UPDATE snapshots SET version = 2, content_html = '<p>Rewritten opening.</p>' WHERE item_id = '${POST}'`);
+  db.sqlite.run(`UPDATE subscriptions SET title = 'Renamed Blyg'`);
+  await pub(db, `${THEM}t/${POST}/\nMy longer comments.`, {}, msg);
+  const d = await doc(db, id);
+  expect([d.version, d.content_md]).toEqual([2, `![[${POST} | ${label}]]\n\nMy longer comments.`]);
+});
+
 test("a stub needs words of its own", async () => {
   const db = followed();
   const calls = network();

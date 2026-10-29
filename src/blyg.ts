@@ -207,7 +207,7 @@ const rfc822 = (iso: string) => new Date(iso).toUTCString();
 export const pagePath = (i: Pick<Item, "id" | "authored_kind">) => `${i.authored_kind === "thread" ? "t" : "f"}/${i.id}/`;
 
 export function excerpt(md: string, n = 80) {
-  const s = md.replace(/!\[\[[^\]]+\]\]/g, "").replace(/^\s*>+/gm, "").replace(/[#*_`\[\]()!]/g, "").replace(/\s+/g, " ").trim();
+  const s = md.replace(/!\[\[[^\]]+\]\]/g, "").replace(/\[\[[0-9a-z]{26}[ \t]*\|([^\]\n]*)\]\]/g, "$1").replace(/^\s*>+/gm, "").replace(/[#*_`\[\]()!]/g, "").replace(/\s+/g, " ").trim();
   return s.length > n ? s.slice(0, n).trimEnd() + "…" : s;
 }
 

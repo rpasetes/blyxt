@@ -79,20 +79,13 @@ async function resolveQuote(db: D1Database, origin: string, id: string, self?: s
 
 // a caption from text as it reads, not markdown (§5.9 caps it near 200 characters)
 // the label blyxt writes on a quote it opens for you, so the source still says what it quotes (§10.1, #70):
-// "blyg: opening words" for a followed post, the opening words for your own. It is the quoter's words and
-// bakes as data-blyg-label (#81); never ]] (a label can't contain it) or a line break
-export async function labelFor(db: D1Database, id: string) {
-  const local = await getItem(db, id);
-  let label: string;
-  if (local) label = excerpt(local.content_md, 60);
-  else {
-    const snap = await db.prepare("SELECT s.content_html, sub.title FROM snapshots s LEFT JOIN subscriptions sub ON sub.origin = s.origin WHERE s.item_id = ? ORDER BY s.fetched DESC LIMIT 1")
-      .bind(id).first<{ content_html: string; title: string | null }>();
-    if (!snap) return undefined;
-    const opening = textContent(snap.content_html).split("\n")[0] ?? "";
-    label = snap.title ? `${snap.title}: ${opening}` : opening;
-  }
-  label = clip(label.replace(/[\[\]]/g, ""), 60);
+// "blyg: opening line" for a followed post, the opening line for your own, from the same snapshot the quote
+// bakes. It is the quoter's words and bakes as data-blyg-label (#81); never ]] (a label can't contain it) or a break
+export async function labelFor(db: D1Database, origin: string, id: string) {
+  const snap = await resolveQuote(db, origin, id);
+  if (typeof snap === "string") return undefined;
+  const opening = textContent(snap.html).split("\n")[0] ?? "";
+  const label = clip((snap.cited?.source ? `${snap.cited.source}: ${opening}` : opening).replace(/[[\]]/g, ""), 60);
   return label || undefined;
 }
 

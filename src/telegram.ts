@@ -89,7 +89,7 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
   // Telegram retries webhooks; a message publishes at most once
   if (await itemForMessage(db, m.chat.id, m.message_id)) return null;
 
-  const prefix = (await quotePrefix(db, m)) ?? (await linkPrefix(db, site, m));
+  const prefix = (await quotePrefix(db, site, m)) ?? (await linkPrefix(db, site, m));
   const md = (prefix?.md ?? "") + (prefix?.rest ?? m.text).trim();
   const composed = await compose(db, site.origin, md);
   if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. fix it and send it again`);
@@ -117,7 +117,7 @@ async function stubNote(db: D1Database, stub: StubOf | undefined, site: Site, it
 
 // replying in Pub to one of your posts, or (from Pub) to a followed post in Sub, quotes it: the reply becomes a thread
 // that opens with ![[id]], or with the part you selected as a partial quote (§10.1), and so is a stub of it
-async function quotePrefix(db: D1Database, m: TgMessage): Promise<{ md: string; rest?: string } | undefined> {
+async function quotePrefix(db: D1Database, site: Site, m: TgMessage): Promise<{ md: string; rest?: string } | undefined> {
   // (in a topic every message replies to the topic's first message, so check both)
   const external = m.external_reply && (!m.external_reply.chat || m.external_reply.chat.id === m.chat.id) ? m.external_reply.message_id : undefined;
   let id: string | undefined;
@@ -129,12 +129,12 @@ async function quotePrefix(db: D1Database, m: TgMessage): Promise<{ md: string; 
   }
   if (!id) return undefined;
   const quote = followed ? await unframe(db, followed, m.quote?.text) : m.quote?.text.trim();
-  return { md: `${await directive(db, id)}\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n` };
+  return { md: `${await directive(db, site, id)}\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n` };
 }
 
 // the directive line blyxt writes, labelled with what it quotes
-const directive = async (db: D1Database, id: string) => {
-  const label = await labelFor(db, id);
+const directive = async (db: D1Database, site: Site, id: string) => {
+  const label = await labelFor(db, site.origin, id);
   return `![[${id}${label ? ` | ${label}` : ""}]]`;
 };
 
@@ -175,7 +175,7 @@ async function linkPrefix(db: D1Database, site: Site, m: TgMessage) {
     if (!url.startsWith(origin)) continue;
     const id = url.slice(origin.length).match(/^(?:[ft]\/([0-9a-z]{26})\/?(?:v\d+\/?)?|items\/([0-9a-z]{26})\.json)(?:[?#].*)?$/);
     const found = id?.[1] ?? id?.[2];
-    if (found && ID_RE.test(found)) return { md: `${await directive(db, found)}\n\n`, rest: rest.join("\n") };
+    if (found && ID_RE.test(found)) return { md: `${await directive(db, site, found)}\n\n`, rest: rest.join("\n") };
   }
   return undefined;
 }
@@ -189,7 +189,11 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   // unchanged text (including Telegram retries) is not a new version
   // a message that opened with a link keeps its first line as the link: it rebuilds the same quote
   const linked = link.prefix ? await linkPrefix(db, site, m) : undefined;
-  const md = linked ? linked.md + linked.rest.trim() : (link.prefix ?? "") + m.text.trim();
+  // a link to the same post keeps the directive it was published with, label included: the label is the
+  // author's words, and a re-read snapshot mustn't rewrite it
+  const quoted = (md: string | null | undefined) => md?.match(/^!\[\[([0-9a-z]{26})/)?.[1];
+  const prefix = linked && quoted(linked.md) === quoted(link.prefix) ? link.prefix! : linked?.md;
+  const md = linked ? prefix + linked.rest.trim() : (link.prefix ?? "") + m.text.trim();
   const composed = await compose(db, site.origin, md, link.item_id);
   if (!composed.ok) return () => reply(cfg, m, `edit not published: ${composed.error}. the post keeps its current version`);
   // the kind is fixed when a post is first published: it decides the page's address
@@ -206,6 +210,8 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
     return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
   }
   const { item, note } = edited;
+  // a link moved to another post: its new directive is the one later edits keep
+  if (linked && prefix !== link.prefix) await db.prepare("UPDATE tg_messages SET prefix = ? WHERE chat_id = ? AND message_id = ?").bind(prefix, m.chat.id, m.message_id).run();
   return async () => {
     await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}${note ? `\nnote: ${note}` : ""}`);
     await mention(db, site, item);
