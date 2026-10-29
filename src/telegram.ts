@@ -4,6 +4,7 @@ import { FRAGMENT_CAP, ID_RE, overCap, pagePath, textContent, type Site, type St
 import { compose, labelFor } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
 import { mention } from "./mentions";
+import { writeNote, type NoteModel } from "./notes";
 import { resolve } from "./resolve";
 import { clearNote, getItem, itemForMessage, lastContent, NOTE_MINUTES, pendingNote, pin, publishEdit, publishNew, queueNote, republish, revise, withdraw } from "./store";
 import {
@@ -35,6 +36,8 @@ export type TgMessage = {
 export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage };
 
 export type Config = {
+  // Workers AI, for changelog notes the owner didn't write; unset, there are none
+  ai?: NoteModel;
   token: string;
   chatId: number;
   pubTopicId: number;
@@ -132,6 +135,9 @@ async function quotePrefix(db: D1Database, site: Site, m: TgMessage): Promise<{ 
   return { md: `${await directive(db, site, id)}\n${quote ? quote.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n") + "\n" : ""}\n` };
 }
 
+// the changelog note a publish carried, as its reply says it; one the model wrote is marked so
+const noteLine = (note: string | null | undefined, generated: boolean) => (note ? `\nnote${generated ? " (written by the model)" : ""}: ${note}` : "");
+
 // the directive line blyxt writes, labelled with what it quotes
 const directive = async (db: D1Database, site: Site, id: string) => {
   const label = await labelFor(db, site.origin, id);
@@ -204,16 +210,16 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (composed.thread && current?.authored_kind === "fragment") {
     return () => reply(cfg, m, "edit not published: a fragment can't quote. send it as a new message (or reply to the post you're quoting)");
   }
-  const edited = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links });
+  const edited = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links }, (before) => writeNote(cfg.ai, before, md));
   if (!edited) {
     if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
     return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
   }
-  const { item, note } = edited;
+  const { item, note, generated } = edited;
   // a link moved to another post: its new directive is the one later edits keep
   if (linked && prefix !== link.prefix) await db.prepare("UPDATE tg_messages SET prefix = ? WHERE chat_id = ? AND message_id = ?").bind(prefix, m.chat.id, m.message_id).run();
   return async () => {
-    await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}${note ? `\nnote: ${note}` : ""}`);
+    await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}${noteLine(note, generated)}`);
     await mention(db, site, item);
   };
 }
@@ -298,7 +304,10 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
 
   if (draft.item_id) {
     const c = { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated };
-    const item = await revise(db, draft.item_id, draft.base_version!, c, draft.note, !!draft.note_generated);
+    // a revision sent without a note gets one written from the version it revises
+    const before = draft.note ? null : await getItem(db, draft.item_id);
+    const auto = before && before.kind !== "withdrawn" && before.version === draft.base_version ? await writeNote(cfg.ai, before.content_md, draft.content_md) : null;
+    const item = await revise(db, draft.item_id, draft.base_version!, c, draft.note ?? auto, draft.note ? !!draft.note_generated : !!auto);
     if (!item) {
       const now = await getItem(db, draft.item_id);
       return () => reply(cfg, m, now?.kind === "withdrawn"
@@ -311,7 +320,7 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
       db.prepare("DELETE FROM drafts WHERE id = ?").bind(draft.id),
     ]);
     return async () => {
-      await reply(cfg, m, `published v${item.version}${marked} → ${site.origin}${pagePath(item)}`);
+      await reply(cfg, m, `published v${item.version}${marked} → ${site.origin}${pagePath(item)}${noteLine(auto, true)}`);
       await mention(db, site, item);
     };
   }
@@ -342,10 +351,13 @@ async function handleRepublish(m: TgMessage, id: string, note: string | null, db
   if (composed.thread && item.authored_kind === "fragment") return () => reply(cfg, m, "not republished: a fragment can't quote. edit out the ![[id]] line, then /republish again");
   if (item.authored_kind === "fragment" && overCap(md)) return () => reply(cfg, m, `not republished: fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters. trim the post, then /republish again`);
   const generated = last?.generated ? JSON.parse(last.generated) : undefined;
-  const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated }, note);
+  // with no note of yours, one is written from the last words it published; the same words back get none
+  const before = note ? null : (last ?? (await lastContent(db, id)))?.content_md;
+  const auto = before && before !== md ? await writeNote(cfg.ai, before, md) : null;
+  const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated }, note ?? auto, !!auto);
   if (!next) return null;
   return async () => {
-    await reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}`);
+    await reply(cfg, m, `republished v${next.version} → ${site.origin}${pagePath(next)}${noteLine(auto, true)}`);
     await mention(db, site, next);
   };
 }

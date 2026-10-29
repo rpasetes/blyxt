@@ -121,14 +121,17 @@ export async function lastStub(db: D1Database, id: string) {
 
 // next version of a published item; null when the text didn't change or the item is withdrawn
 // (a thread re-resolves on every publish, so unchanged text is still unchanged content: snapshots refresh on the next edit)
-// an edit's next version, with the note queued by /note if there is a fresh one
-export async function publishEdit(db: D1Database, id: string, c: Content) {
+// an edit's next version, with the note queued by /note if there is a fresh one, else the one auto writes
+// from the version it replaces (marked generated); generated says which it was
+export async function publishEdit(db: D1Database, id: string, c: Content, auto?: (before: string) => Promise<string | null>) {
   const item = await getItem(db, id);
   if (!item || item.kind === "withdrawn" || item.content_md === c.md) return null;
-  const note = await pendingNote(db, id);
-  const next = await bump(db, item, item.kind, c, note);
-  if (note) await clearNote(db, id);
-  return { item: next, note };
+  const queued = await pendingNote(db, id);
+  const note = queued ?? (auto ? await auto(item.content_md) : null);
+  const generated = !queued && !!note;
+  const next = await bump(db, item, item.kind, c, note, generated);
+  if (queued) await clearNote(db, id);
+  return { item: next, note, generated };
 }
 
 // a queued note waits this long for the edit it describes
@@ -168,10 +171,10 @@ export const lastContent = (db: D1Database, id: string) =>
   db.prepare("SELECT content_md, generated FROM versions WHERE item_id = ? AND kind != 'withdrawn' ORDER BY version DESC LIMIT 1").bind(id).first<{ content_md: string; generated: string | null }>();
 
 // a withdrawn item returns under its id: vN+1 with its authored kind (§9); null unless it is withdrawn
-export async function republish(db: D1Database, id: string, c: Content, note: string | null) {
+export async function republish(db: D1Database, id: string, c: Content, note: string | null, noteGenerated = false) {
   const item = await getItem(db, id);
   if (!item || item.kind !== "withdrawn") return null;
-  return bump(db, item, item.authored_kind, c, note);
+  return bump(db, item, item.authored_kind, c, note, noteGenerated);
 }
 
 export type PinnedVersion = Version & { content_md: string; content_html: string; content_hash: string; transclusions: string | null; generated: string | null; stub_of: string | null; links: string | null };

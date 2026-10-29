@@ -12,6 +12,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Workers AI, for changelog notes the owner didn't write (free daily allowance)
+  "ai": { "binding": "AI" },
   // poll followed blygs (§12.3)
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
