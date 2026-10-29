@@ -54,8 +54,10 @@ async function provenance(db: D1Database, origin: string, input: unknown): Promi
     // a source is an exact published version: of one of this blyg's posts, else (0.4) of a followed blyg's post as
     // blyxt holds it, resolved like a directive: never a live fetch, and an ambiguous id is an error (§5.7, §10.2)
     if (typeof s?.id !== "string" || !ID_RE.test(s.id) || !Number.isInteger(s.version)) return "each source is { id, version } of a post here or in a blyg you follow";
-    if (await getItem(db, s.id)) {
-      // a local id never falls through to an import (§10.2)
+    const local = await getItem(db, s.id);
+    if (local) {
+      // a local id never falls through to an import (§10.2), and like a directive, a withdrawn post can't be one
+      if (local.kind === "withdrawn") return `source ${s.id} is withdrawn`;
       const v = await db.prepare("SELECT kind FROM versions WHERE item_id = ? AND version = ?").bind(s.id, s.version).first<{ kind: string }>();
       if (!v || v.kind === "withdrawn") return `${s.id} v${s.version} isn't a published version on this blyg`;
       named.push({ id: s.id, version: s.version as number });

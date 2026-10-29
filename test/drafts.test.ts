@@ -229,3 +229,14 @@ test("a source from a followed blyg is disclosed with its origin and cited, and 
   expect(db.sqlite.query("SELECT relation, target_version, status FROM mentions_out").all()).toEqual([{ relation: "source", target_version: 3, status: "sent" }]);
   expect(mentioned).toHaveLength(1);
 });
+
+test("a source resolves like a directive: a post of yours that's withdrawn now can't be one (§5.7)", async () => {
+  const db = d1();
+  const calls = bot();
+  const id = await published(db, calls, "something to draw on");
+  const source = { content_md: "drawn from it", generated: { model: "m", sources: [{ id, version: 1 }] } };
+  expect((await submit(db, source)).status).toBe(201);
+  await command(db, "/withdraw", 500);
+  const res = await submit(db, source);
+  expect([res.status, ((await res.json()) as { error: string }).error]).toEqual([400, `source ${id} is withdrawn`]);
+});
