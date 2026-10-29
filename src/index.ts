@@ -1,5 +1,4 @@
 import type { Site } from "./blyg";
-import type { NoteModel } from "./notes";
 import { handleDraftRequest } from "./drafts";
 import { deliverDue } from "./mentions";
 import { serveBlyg } from "./serve";
@@ -21,15 +20,15 @@ export type Env = {
   TELEGRAM_WEBHOOK_SECRET: string;
   // lets other clients submit drafts to Pub; unset, the endpoint doesn't exist
   DRAFT_TOKEN?: string;
-  // Workers AI (wrangler.jsonc "ai"), for changelog notes the owner didn't write
-  AI?: NoteModel;
+  // Haiku writes the changelog notes the owner didn't; unset, blyxt asks for them instead
+  ANTHROPIC_API_KEY?: string;
 };
 
 const WEBHOOK_PATH = "/telegram/webhook";
 const DRAFTS_PATH = "/api/drafts";
 
 const configOf = (env: Env) => ({
-  ai: env.AI,
+  anthropicKey: env.ANTHROPIC_API_KEY,
   token: env.TELEGRAM_BOT_TOKEN,
   chatId: Number(env.TELEGRAM_CHAT_ID),
   pubTopicId: Number(env.PUB_TOPIC_ID),

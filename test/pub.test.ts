@@ -42,6 +42,8 @@ test("a fragment edited past the cap is refused; a thread has no cap", async () 
   const thread = await send(db, "x".repeat(2500));
   await send(db, "y".repeat(2001), fragment);
   await send(db, "y".repeat(3000), thread);
-  expect(kinds(db)).toEqual([{ kind: "fragment", version: 1 }, { kind: "thread", version: 2 }]);
+  // the thread's edit is accepted, and held for its changelog note
+  expect(kinds(db)).toEqual([{ kind: "fragment", version: 1 }, { kind: "thread", version: 1 }]);
+  expect(replies[3]).toStartWith("held v2: what changed?");
   expect(replies[2]).toBe("edit not published: fragments stay within 2,000 characters, and this is 2,001. trim it, or send it as a new message to publish a thread");
 });

@@ -81,6 +81,7 @@ test("a message opening with a followed post's link stubs it, and edits keep the
   const msg = await pub(db, `${THEM}t/${POST}/\nMy comments.`);
   const { id } = only(db);
   expect((await getItem(db, id))!.content_md).toBe(`![[${POST} | Their Blyg: This seems like an important piece so maybe we c…]]\n\nMy comments.`);
+  await pub(db, "/note longer", { reply_to_message: { message_id: msg, chat: { id: -100 }, from: { id: 1 } } });
   await pub(db, `${THEM}t/${POST}/\nMy longer comments.`, {}, msg);
   const d = await doc(db, id);
   expect([d.version, d.content_md, d.stub_of.id]).toEqual([2, `![[${POST} | Their Blyg: This seems like an important piece so maybe we c…]]\n\nMy longer comments.`, POST]);
@@ -95,6 +96,7 @@ test("an edit keeps the label its link was published with, even after the follow
   const label = "Their Blyg: This seems like an important piece so maybe we c…";
   db.sqlite.run(`UPDATE snapshots SET version = 2, content_html = '<p>Rewritten opening.</p>' WHERE item_id = '${POST}'`);
   db.sqlite.run(`UPDATE subscriptions SET title = 'Renamed Blyg'`);
+  await pub(db, "/note longer", { reply_to_message: { message_id: msg, chat: { id: -100 }, from: { id: 1 } } });
   await pub(db, `${THEM}t/${POST}/\nMy longer comments.`, {}, msg);
   const d = await doc(db, id);
   expect([d.version, d.content_md]).toEqual([2, `![[${POST} | ${label}]]\n\nMy longer comments.`]);

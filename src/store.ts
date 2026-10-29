@@ -121,17 +121,67 @@ export async function lastStub(db: D1Database, id: string) {
 
 // next version of a published item; null when the text didn't change or the item is withdrawn
 // (a thread re-resolves on every publish, so unchanged text is still unchanged content: snapshots refresh on the next edit)
-// an edit's next version, with the note queued by /note if there is a fresh one, else the one auto writes
-// from the version it replaces (marked generated); generated says which it was
-export async function publishEdit(db: D1Database, id: string, c: Content, auto?: (before: string) => Promise<string | null>) {
+// Every edit's version carries a changelog note: the one queued by /note, else one auto writes from the version it
+// replaces (marked generated). With neither, the edit is held unpublished until the owner writes one (held: true)
+export type Edited =
+  | { item: Item; note: string; generated: boolean; held?: undefined }
+  | { held: { id: number; version: number; asked: boolean }; item?: undefined };
+
+export async function publishEdit(db: D1Database, id: string, c: Content, chatId: number, auto?: (before: string) => Promise<string | null>): Promise<Edited | null> {
   const item = await getItem(db, id);
-  if (!item || item.kind === "withdrawn" || item.content_md === c.md) return null;
+  if (!item || item.kind === "withdrawn") return null;
+  // edited back to what's published: nothing to publish, and nothing left to hold
+  if (item.content_md === c.md) {
+    await db.prepare("UPDATE held_edits SET state = 'dropped' WHERE item_id = ? AND state = 'held'").bind(id).run();
+    return null;
+  }
   const queued = await pendingNote(db, id);
   const note = queued ?? (auto ? await auto(item.content_md) : null);
-  const generated = !queued && !!note;
+  if (!note) return { held: await hold(db, item, c, chatId) };
+  const generated = !queued;
   const next = await bump(db, item, item.kind, c, note, generated);
   if (queued) await clearNote(db, id);
+  await db.prepare("UPDATE held_edits SET state = 'dropped' WHERE item_id = ? AND state = 'held'").bind(id).run();
   return { item: next, note, generated };
+}
+
+export type Held = { id: number; item_id: string; base_version: number; content: string; chat_id: number; ask_message_id: number | null; state: string };
+
+// one held edit per post: a later edit replaces the text it holds; returns whether it was already asked about
+async function hold(db: D1Database, item: Item, c: Content, chatId: number) {
+  const content = JSON.stringify({ md: c.md, html: c.html, transclusions: c.transclusions, links: c.links ?? [] });
+  const held = await heldFor(db, item.id);
+  if (held && held.base_version === item.version) {
+    await db.prepare("UPDATE held_edits SET content = ?, at = ? WHERE id = ?").bind(content, now(), held.id).run();
+    return { id: held.id, version: item.version + 1, asked: !!held.ask_message_id };
+  }
+  if (held) await db.prepare("UPDATE held_edits SET state = 'dropped' WHERE id = ?").bind(held.id).run();
+  const row = await db.prepare("INSERT INTO held_edits (item_id, base_version, content, chat_id, at) VALUES (?, ?, ?, ?, ?) RETURNING id")
+    .bind(item.id, item.version, content, chatId, now()).first<{ id: number }>();
+  return { id: row!.id, version: item.version + 1, asked: false };
+}
+
+export const heldFor = (db: D1Database, id: string) =>
+  db.prepare("SELECT * FROM held_edits WHERE item_id = ? AND state = 'held' ORDER BY id DESC LIMIT 1").bind(id).first<Held>();
+
+// the hold blyxt asked about in this message, whatever became of it
+export const heldForAsk = (db: D1Database, chatId: number, messageId: number) =>
+  db.prepare("SELECT * FROM held_edits WHERE chat_id = ? AND ask_message_id = ?").bind(chatId, messageId).first<Held>();
+
+export const askedAbout = (db: D1Database, heldId: number, messageId: number) =>
+  db.prepare("UPDATE held_edits SET ask_message_id = ? WHERE id = ?").bind(messageId, heldId).run();
+
+// a held edit becomes the next version with the owner's note; null (and dropped) when the post moved on since
+export async function publishHeld(db: D1Database, held: Held, note: string) {
+  const item = await getItem(db, held.item_id);
+  if (!item || item.kind === "withdrawn" || item.version !== held.base_version) {
+    await db.prepare("UPDATE held_edits SET state = 'dropped' WHERE id = ?").bind(held.id).run();
+    return null;
+  }
+  const next = await bump(db, item, item.kind, JSON.parse(held.content) as Content, note);
+  await db.prepare("UPDATE held_edits SET state = 'published' WHERE id = ?").bind(held.id).run();
+  await clearNote(db, item.id);
+  return next;
 }
 
 // a queued note waits this long for the edit it describes

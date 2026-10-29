@@ -40,8 +40,13 @@ test("/note before an edit publishes the edit's version with that note, once", a
   expect(sent.at(-1)).toContain(`your next edit publishes v2 with "sharpened the claim"`);
   await pub(db, "second take", {}, post);
   expect(sent.at(-1)).toEndWith("\nnote: sharpened the claim");
+  // the queued note was used once: the next edit is held until it gets its own
   await pub(db, "third take", {}, post);
-  expect(await notes(db)).toEqual([null, "sharpened the claim", null]);
+  expect(sent.at(-1)).toStartWith("held v3: what changed?");
+  expect(await notes(db)).toEqual([null, "sharpened the claim"]);
+  await pub(db, "tightened the ending", replyTo(900));
+  expect(sent.at(-1)).toEndWith("\nnote: tightened the ending");
+  expect(await notes(db)).toEqual([null, "sharpened the claim", "tightened the ending"]);
 });
 
 test("/note alone drops a queued note; a stale one lapses", async () => {
@@ -50,11 +55,12 @@ test("/note alone drops a queued note; a stale one lapses", async () => {
   const post = await pub(db, "first take");
   await pub(db, "/note oops", replyTo(post));
   await pub(db, "/note", replyTo(post));
-  expect(sent.at(-1)).toBe(`dropped the note "oops"; the next edit publishes without one`);
+  expect(sent.at(-1)).toBe(`dropped the note "oops"; the next edit will ask for one`);
   await pub(db, "/note too early", replyTo(post));
   db.sqlite.exec("UPDATE pending_notes SET at = '2000-01-01T00:00:00Z'");
   await pub(db, "second take", {}, post);
-  expect(await notes(db)).toEqual([null, null]);
+  expect(await notes(db)).toEqual([null]);
+  expect(sent.at(-1)).toStartWith("held v2: what changed?");
   expect(db.sqlite.query("SELECT COUNT(*) AS n FROM pending_notes").get()).toEqual({ n: 0 });
 });
 

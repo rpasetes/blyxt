@@ -4,9 +4,9 @@ import { FRAGMENT_CAP, ID_RE, overCap, pagePath, textContent, type Site, type St
 import { compose, labelFor } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
 import { mention } from "./mentions";
-import { writeNote, type NoteModel } from "./notes";
+import { writeNote } from "./notes";
 import { resolve } from "./resolve";
-import { clearNote, getItem, itemForMessage, lastContent, NOTE_MINUTES, pendingNote, pin, publishEdit, publishNew, queueNote, republish, revise, withdraw } from "./store";
+import { askedAbout, clearNote, getItem, heldFor, heldForAsk, publishHeld, type Held, itemForMessage, lastContent, NOTE_MINUTES, pendingNote, pin, publishEdit, publishNew, queueNote, republish, revise, withdraw } from "./store";
 import {
   addLegacySubscription,
   addSubscription,
@@ -36,8 +36,8 @@ export type TgMessage = {
 export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage };
 
 export type Config = {
-  // Workers AI, for changelog notes the owner didn't write; unset, there are none
-  ai?: NoteModel;
+  // Anthropic API key: Haiku writes the changelog notes the owner didn't; unset, blyxt asks for them instead
+  anthropicKey?: string;
   token: string;
   chatId: number;
   pubTopicId: number;
@@ -91,6 +91,10 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
 
   // Telegram retries webhooks; a message publishes at most once
   if (await itemForMessage(db, m.chat.id, m.message_id)) return null;
+
+  // a reply to blyxt's "what changed?" is the note for the edit it holds, never a post of its own
+  const held = m.reply_to_message && (await heldForAsk(db, m.chat.id, m.reply_to_message.message_id));
+  if (held) return held.state === "held" ? publishHeldEdit(m, held, m.text.trim(), db, site, cfg) : null;
 
   const prefix = (await quotePrefix(db, site, m)) ?? (await linkPrefix(db, site, m));
   const md = (prefix?.md ?? "") + (prefix?.rest ?? m.text).trim();
@@ -210,14 +214,23 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   if (composed.thread && current?.authored_kind === "fragment") {
     return () => reply(cfg, m, "edit not published: a fragment can't quote. send it as a new message (or reply to the post you're quoting)");
   }
-  const edited = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links }, (before) => writeNote(cfg.ai, before, md));
+  const edited = await publishEdit(db, link.item_id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links }, m.chat.id, (before) => writeNote(cfg.anthropicKey, before, md));
   if (!edited) {
     if ((await getItem(db, link.item_id))?.kind !== "withdrawn") return null;
     return () => reply(cfg, m, "edit not published: this post is withdrawn. reply /republish to it to bring it back with this text");
   }
-  const { item, note, generated } = edited;
   // a link moved to another post: its new directive is the one later edits keep
   if (linked && prefix !== link.prefix) await db.prepare("UPDATE tg_messages SET prefix = ? WHERE chat_id = ? AND message_id = ?").bind(prefix, m.chat.id, m.message_id).run();
+  // no note to publish with: the edit waits, and blyxt asks once (a later edit updates what it holds)
+  if (edited.held) {
+    const { held } = edited;
+    if (held.asked) return null;
+    return async () => {
+      const asked = await reply(cfg, m, `held v${held.version}: what changed? reply to this with a changelog note and the edit publishes with it. edit again first to change it, or edit it back to drop it`);
+      if (asked.ok) await askedAbout(db, held.id, (asked.result as { message_id: number }).message_id);
+    };
+  }
+  const { item, note, generated } = edited;
   return async () => {
     await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}${noteLine(note, generated)}`);
     await mention(db, site, item);
@@ -239,11 +252,11 @@ async function target(m: TgMessage, db: D1Database, args: string[]) {
 async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
   const [command, ...args] = m.text!.trim().split(/\s+/);
   const name = command.slice(1).split("@")[0].toLowerCase();
-  if (name === "publish" || name === "discard") return handleDraftCommand(m, name, db, site, cfg);
+  if (name === "publish" || name === "discard") return handleDraftCommand(m, name, db, site, cfg, args.join(" "));
   if (!["note", "withdraw", "republish", "pin"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
   const id = await target(m, db, args);
   if (!id) return () => reply(cfg, m, PUB_USAGE);
-  if (name === "note") return handleNote(m, id, args.join(" "), db, cfg);
+  if (name === "note") return handleNote(m, id, args.join(" "), db, site, cfg);
   if (name === "pin") return handlePin(m, null, id, db, site, cfg, args[0]);
   if (name === "republish") return handleRepublish(m, id, args.join(" ") || null, db, site, cfg);
 
@@ -260,23 +273,37 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
   return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
 }
 
-// /note queues the changelog note for a post's next edit; /note alone takes it back
-async function handleNote(m: TgMessage, id: string, note: string, db: D1Database, cfg: Config) {
+// a held edit publishes as the next version, with the owner's note
+async function publishHeldEdit(m: TgMessage, held: Held, note: string, db: D1Database, site: Site, cfg: Config) {
+  if (!note) return () => reply(cfg, m, "a changelog note needs words: say what changed");
+  const item = await publishHeld(db, held, note);
+  if (!item) return () => reply(cfg, m, "not published: the post changed since that edit was held, so the hold is dropped. edit it again");
+  return async () => {
+    await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}${noteLine(note, false)}`);
+    await mention(db, site, item);
+  };
+}
+
+// /note queues the changelog note for a post's next edit (or publishes one waiting for it); /note alone takes it back
+async function handleNote(m: TgMessage, id: string, note: string, db: D1Database, site: Site, cfg: Config) {
   const item = await getItem(db, id);
   if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
   if (!note) {
     const had = await pendingNote(db, id);
     await clearNote(db, id);
-    return () => reply(cfg, m, had ? `dropped the note "${had}"; the next edit publishes without one` : "no note queued for this post");
+    return () => reply(cfg, m, had ? `dropped the note "${had}"; the next edit will ask for one` : "no note queued for this post");
   }
   if (item.kind === "withdrawn") return () => reply(cfg, m, "this post is withdrawn: reply /republish <note> to bring it back with a note");
+  // an edit already waiting for its note publishes with this one
+  const held = await heldFor(db, id);
+  if (held) return publishHeldEdit(m, held, note, db, site, cfg);
   await queueNote(db, id, note);
   return () => reply(cfg, m, `noted. your next edit publishes v${item.version + 1} with "${note}" (within ${NOTE_MINUTES} minutes; /note alone drops it)`);
 }
 
 // a draft another client submitted becomes v1 only when you /publish it in Pub; the preview message
 // then stands for the post, so /withdraw and /pin work on it like on your own messages
-async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db: D1Database, site: Site, cfg: Config) {
+async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db: D1Database, site: Site, cfg: Config, note = "") {
   const to = m.reply_to_message?.message_id;
   const draft = to && (await draftForMessage(db, m.chat.id, to));
   if (!draft) {
@@ -304,10 +331,13 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
 
   if (draft.item_id) {
     const c = { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated };
-    // a revision sent without a note gets one written from the version it revises
-    const before = draft.note ? null : await getItem(db, draft.item_id);
-    const auto = before && before.kind !== "withdrawn" && before.version === draft.base_version ? await writeNote(cfg.ai, before.content_md, draft.content_md) : null;
-    const item = await revise(db, draft.item_id, draft.base_version!, c, draft.note ?? auto, draft.note ? !!draft.note_generated : !!auto);
+    // every version has a note: the draft's, else yours as /publish <note>, else one Haiku writes from the version
+    // it revises; with none of those it waits for yours
+    const given = draft.note ?? (note || null);
+    const before = given ? null : await getItem(db, draft.item_id);
+    const auto = before && before.kind !== "withdrawn" && before.version === draft.base_version ? await writeNote(cfg.anthropicKey, before.content_md, draft.content_md) : null;
+    if (!given && !auto) return () => reply(cfg, m, "not published: this revision has no changelog note. reply /publish <what changed> to publish it with yours");
+    const item = await revise(db, draft.item_id, draft.base_version!, c, given ?? auto, draft.note ? !!draft.note_generated : !given);
     if (!item) {
       const now = await getItem(db, draft.item_id);
       return () => reply(cfg, m, now?.kind === "withdrawn"
@@ -353,7 +383,9 @@ async function handleRepublish(m: TgMessage, id: string, note: string | null, db
   const generated = last?.generated ? JSON.parse(last.generated) : undefined;
   // with no note of yours, one is written from the last words it published; the same words back get none
   const before = note ? null : (last ?? (await lastContent(db, id)))?.content_md;
-  const auto = before && before !== md ? await writeNote(cfg.ai, before, md) : null;
+  const auto = before && before !== md ? await writeNote(cfg.anthropicKey, before, md) : null;
+  // bringing back different words is a revision, and a revision says what changed
+  if (before && before !== md && !auto) return () => reply(cfg, m, "not republished: the words differ from what it last published, so it needs a changelog note. reply /republish <what changed>");
   const next = await republish(db, id, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated }, note ?? auto, !!auto);
   if (!next) return null;
   return async () => {

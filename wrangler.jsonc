@@ -12,8 +12,6 @@
       "migrations_dir": "migrations"
     }
   ],
-  // Workers AI, for changelog notes the owner didn't write (free daily allowance)
-  "ai": { "binding": "AI" },
   // poll followed blygs (§12.3)
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
@@ -29,5 +27,6 @@
     "SUB_TOPIC_ID": "3",
     "OWNER_USER_ID": "2046988413"
   }
-  // secrets (wrangler secret put / .dev.vars): TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
+  // secrets (wrangler secret put / .dev.vars): TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, DRAFT_TOKEN,
+  // and optionally ANTHROPIC_API_KEY, so Haiku writes the changelog notes you leave out
 }
