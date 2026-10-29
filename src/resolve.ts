@@ -1,5 +1,5 @@
 // Resolution: from a shared URL to a blyg subscription (spec §12).
-export const USER_AGENT = "blyxt/0.1.0 (+https://github.com/rpasetes/blyxt)";
+export const USER_AGENT = "blyxt/0.2.0 (+https://github.com/rpasetes/blyxt)";
 
 export type Manifest = { blyg: string; site?: string; title?: string; feed?: string; items?: string; item?: string; pin?: string; [k: string]: unknown };
 

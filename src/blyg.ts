@@ -221,7 +221,7 @@ export function manifest(site: Site, updated: string) {
   return {
     blyg: "0.4",
     level: 2,
-    generator: "blyxt/0.1.0",
+    generator: "blyxt/0.2.0",
     generator_url: "https://github.com/rpasetes/blyxt",
     site: site.origin,
     title: site.title,
