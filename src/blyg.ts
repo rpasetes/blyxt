@@ -12,7 +12,11 @@ export type Site = {
   subtitle: string;
   // the publication identity (§6.1); avatar is origin-relative, served from public/
   author: { name: string; url: string; bio?: string; avatar?: string; links?: { label: string; url: string }[] };
+  // the HTML pages' menu, read from D1 when a page is served; never in a document
+  menu?: Menu;
 };
+
+export type Menu = { pages: { label: string; url: string }[]; collections: { name: string; url: string; count: number }[] };
 
 export type Item = {
   id: string;
@@ -358,13 +362,14 @@ ${head}
     .blyg-partial { font-style: italic; }
     .masthead { display: flex; gap: .9rem; align-items: center; margin-bottom: 1.5rem; }
     .masthead img { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; flex: none; }
+    nav.menu { font: 14px/1.6 ui-monospace, monospace; margin-bottom: 1rem; } nav.menu p { margin: 0; } nav.menu .label { color: #777; }
     .masthead p { margin: 0; } .site-name { font-size: 1.35rem; } .site-name a { color: inherit; text-decoration: none; }
     @media (prefers-color-scheme: dark) { body { color: #ddd; background: #161512; } a { color: #e08a5f; } article { border-color: #333; } .blyg-transclusion { background: #1f1d19; border-left-color: #e08a5f; } }
   </style>
 </head>
 <body>
 ${masthead(site)}
-${body}
+${menu(site)}${body}
 </body>
 </html>
 `;
@@ -379,6 +384,23 @@ function masthead(site: Site) {
 <p><em>${esc(site.subtitle)}</em></p>
 <p class="meta">${[...links, `<a href="${esc(site.origin)}feed.xml">rss</a>`, `<a href="${esc(site.origin)}blyg.json">blyg.json</a>`].join(" · ")}</p>
 </div></header>`;
+}
+
+function menu(site: Site) {
+  const m = site.menu;
+  if (!m || (!m.pages.length && !m.collections.length)) return "";
+  const row = (label: string, links: string[]) => links.length ? `<p><span class="label">${label}:</span> ${links.join(" · ")}</p>\n` : "";
+  return `<nav class="menu" aria-label="menu">
+${row("pages", m.pages.map((p) => `<a href="${esc(p.url)}">${esc(p.label)}</a>`))}${row("collections", m.collections.map((c) => `<a href="${esc(c.url)}">${esc(c.name)}</a> <span class="label">${c.count}</span>`))}</nav>
+`;
+}
+
+const article = (site: Site, i: Item) =>
+  `<article>${i.content_html}<p class="meta"><a href="${esc(site.origin + pagePath(i))}">v${i.version} · ${i.updated}</a></p></article>`;
+
+// h/{slug}/: one collection, newest first; presentation, outside the protocol's paths (§4)
+export function collectionPage(site: Site, name: string, items: Item[]) {
+  return layout(site, `${name} · ${site.title}`, `  <meta name="description" content="${esc(name)}">`, `<h2>${esc(name)}</h2>\n${items.map((i) => article(site, i)).join("\n")}`);
 }
 
 // the live page cites only versions promised forever: itself and its pins (§8.4)
@@ -423,7 +445,7 @@ export function pinnedPage(site: Site, item: Item, v: Version & Pick<Item, "cont
 export function indexPage(site: Site, items: Item[]) {
   const list = items
     .filter((i) => i.kind !== "withdrawn")
-    .map((i) => `<article>${i.content_html}<p class="meta"><a href="${esc(site.origin + pagePath(i))}">v${i.version} · ${i.updated}</a></p></article>`)
+    .map((i) => article(site, i))
     .join("\n");
   const image = site.author.avatar ? `\n  <meta property="og:image" content="${esc(new URL(site.author.avatar, site.origin).href)}">` : "";
   return layout(site, site.title, `  <meta name="description" content="${esc(site.subtitle)}">${image}`, list);

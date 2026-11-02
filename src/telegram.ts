@@ -3,6 +3,7 @@
 import { FRAGMENT_CAP, ID_RE, overCap, pagePath, textContent, type Site, type StubOf } from "./blyg";
 import { compose, labelFor } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
+import { file, setPage, unfile } from "./home";
 import { mention } from "./mentions";
 import { writeNote } from "./notes";
 import { resolve } from "./resolve";
@@ -237,7 +238,7 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   };
 }
 
-const PUB_USAGE = "reply to a published post with /note <what you're changing> before editing it, /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); reply to a draft with /publish or /discard";
+const PUB_USAGE = "reply to a published post with /note <what you're changing> before editing it, /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); /file <collection>, /unfile <collection>, /page <menu label> or /unpage; reply to a draft with /publish or /discard";
 
 // the post a command names: the message it replies to, else a link or id as the first argument
 // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
@@ -253,9 +254,10 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
   const [command, ...args] = m.text!.trim().split(/\s+/);
   const name = command.slice(1).split("@")[0].toLowerCase();
   if (name === "publish" || name === "discard") return handleDraftCommand(m, name, db, site, cfg, args.join(" "));
-  if (!["note", "withdraw", "republish", "pin"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
+  if (!["note", "withdraw", "republish", "pin", "file", "unfile", "page", "unpage"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
   const id = await target(m, db, args);
   if (!id) return () => reply(cfg, m, PUB_USAGE);
+  if (["file", "unfile", "page", "unpage"].includes(name)) return handleHome(m, name, id, args.join(" "), db, site, cfg);
   if (name === "note") return handleNote(m, id, args.join(" "), db, site, cfg);
   if (name === "pin") return handlePin(m, null, id, db, site, cfg, args[0]);
   if (name === "republish") return handleRepublish(m, id, args.join(" ") || null, db, site, cfg);
@@ -271,6 +273,28 @@ async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: C
   const existing = await getItem(db, id);
   if (!existing) return () => reply(cfg, m, `no post ${id} on this blyg`);
   return () => reply(cfg, m, `already withdrawn (v${existing.version})`);
+}
+
+// filing a post or listing it in the menu changes the home page only: no version, no feed entry, no mention
+async function handleHome(m: TgMessage, name: string, id: string, arg: string, db: D1Database, site: Site, cfg: Config) {
+  const item = await getItem(db, id);
+  if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
+  if (name === "unpage") {
+    await setPage(db, id, null);
+    return () => reply(cfg, m, "off the menu");
+  }
+  if (!arg) return () => reply(cfg, m, name === "page" ? "/page <label>, e.g. /page About" : `/${name} <collection>`);
+  if (name === "page") {
+    await setPage(db, id, arg);
+    return () => reply(cfg, m, `on the menu as "${arg}" → ${site.origin}`);
+  }
+  if (name === "unfile") {
+    const had = await unfile(db, id, arg);
+    return () => reply(cfg, m, had ? `taken out of ${arg}` : `not in ${arg}`);
+  }
+  const filed = await file(db, id, arg);
+  if (!filed) return () => reply(cfg, m, "a collection name needs a letter or digit");
+  return () => reply(cfg, m, `${filed.added ? "filed in" : "already in"} ${filed.name} → ${site.origin}h/${encodeURIComponent(filed.slug)}/`);
 }
 
 // a held edit publishes as the next version, with the owner's note

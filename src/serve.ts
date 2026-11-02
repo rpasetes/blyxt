@@ -1,5 +1,6 @@
 // Read side of the blyg: every protocol surface, rendered from D1 on request.
-import { archiveIndex, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, pinnedDocument, pinnedPage, type Item, type Site } from "./blyg";
+import { archiveIndex, collectionPage, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, pinnedDocument, pinnedPage, type Item, type Site } from "./blyg";
+import { collection, collectionItems, menuOf } from "./home";
 import { changelog, getItem, getPinned, lastUpdated, listItems, recentEvents } from "./store";
 
 const TYPES = {
@@ -26,6 +27,8 @@ const json = (req: Request, data: unknown) => respond(req, JSON.stringify(data, 
 const notFound = (path = "") => new Response(`not found: /${path}\n`, { status: 404, headers: { "access-control-allow-origin": "*" } });
 
 export async function serveBlyg(req: Request, db: D1Database, site: Site, path: string) {
+  // HTML pages carry the menu; documents never see it
+  if (path === "" || path === "index.html" || /\/$/.test(path)) site = { ...site, menu: await menuOf(db, site) };
   if (path === "" || path === "index.html") return respond(req, indexPage(site, await listItems(db)), "html");
   if (path === "blyg.json") return json(req, manifest(site, await lastUpdated(db)));
   if (path === "items/index.json") {
@@ -50,6 +53,14 @@ export async function serveBlyg(req: Request, db: D1Database, site: Site, path: 
   if (m && ID_RE.test(m[1])) {
     const v = await getPinned(db, m[1], Number(m[2]));
     return v ? json(req, pinnedDocument(site, v)) : notFound();
+  }
+
+  m = path.match(/^h\/([^/]+)\/$/);
+  if (m) {
+    let slug = "";
+    try { slug = decodeURIComponent(m[1]); } catch { /* malformed: no such collection */ }
+    const c = await collection(db, slug);
+    return c ? respond(req, collectionPage(site, c.name, await collectionItems(db, c.slug)), "html") : notFound(path);
   }
 
   m = path.match(/^([ft])\/([0-9a-z]{26})\/(?:v([1-9]\d*)\/)?$/);
