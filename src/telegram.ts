@@ -330,7 +330,7 @@ export async function expireHeldEdits(db: D1Database, cfg: Pick<Config, "token">
 async function publishHeldEdit(m: TgMessage, held: Held, note: string, db: D1Database, site: Site, cfg: Config) {
   if (!note) return () => reply(cfg, m, "a changelog note needs words: say what changed");
   const item = await publishHeld(db, held, note);
-  if (!item) return () => reply(cfg, m, "not published: the post changed since that edit was held, so the hold is dropped. edit it again");
+  if (!item) return () => reply(cfg, m, "not published: that edit was dropped (the post changed since, or it waited too long). edit it again");
   return async () => {
     await reply(cfg, m, `published v${item.version} → ${site.origin}${pagePath(item)}${noteLine(note, false)}`);
     await mention(db, site, item);

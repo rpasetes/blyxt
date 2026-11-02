@@ -190,8 +190,16 @@ export async function publishHeld(db: D1Database, held: Held, note: string) {
     await db.prepare("UPDATE held_edits SET state = 'dropped' WHERE id = ?").bind(held.id).run();
     return null;
   }
-  const next = await bump(db, item, item.kind, JSON.parse(held.content) as Content, note);
-  await db.prepare("UPDATE held_edits SET state = 'published' WHERE id = ?").bind(held.id).run();
+  // claim it first, so a hold the cron drops in the same instant is never both published and called dropped
+  const claimed = await db.prepare("UPDATE held_edits SET state = 'published' WHERE id = ? AND state = 'held' RETURNING id").bind(held.id).first();
+  if (!claimed) return null;
+  let next: Item;
+  try {
+    next = await bump(db, item, item.kind, JSON.parse(held.content) as Content, note);
+  } catch (e) {
+    await db.prepare("UPDATE held_edits SET state = 'held' WHERE id = ?").bind(held.id).run();
+    throw e;
+  }
   await clearNote(db, item.id);
   return next;
 }
