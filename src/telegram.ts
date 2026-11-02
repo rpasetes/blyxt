@@ -7,7 +7,7 @@ import { blogroll, file, setPage, setRolled, unfile } from "./home";
 import { mention } from "./mentions";
 import { writeNote } from "./notes";
 import { resolve } from "./resolve";
-import { askedAbout, clearNote, getItem, heldFor, heldForAsk, publishHeld, type Held, itemForMessage, lastContent, NOTE_MINUTES, pendingNote, pin, publishEdit, publishNew, queueNote, republish, revise, withdraw } from "./store";
+import { askedAbout, clearNote, dropHeld, expireHolds, getItem, heldFor, heldForAsk, HOLD_MINUTES, publishHeld, type Held, itemForMessage, lastContent, NOTE_MINUTES, pendingNote, pin, publishEdit, publishNew, queueNote, republish, revise, withdraw } from "./store";
 import {
   addLegacySubscription,
   addSubscription,
@@ -95,7 +95,12 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
 
   // a reply to blyxt's "what changed?" is the note for the edit it holds, never a post of its own
   const held = m.reply_to_message && (await heldForAsk(db, m.chat.id, m.reply_to_message.message_id));
-  if (held) return held.state === "held" ? publishHeldEdit(m, held, m.text.trim(), db, site, cfg) : null;
+  if (held) {
+    if (held.state === "held") return publishHeldEdit(m, held, m.text.trim(), db, site, cfg);
+    // a note that came too late is lost, so say so; a retried one for a published edit needs nothing
+    if (held.state === "dropped") return () => reply(cfg, m, `that edit was dropped, so the post stays at v${held.base_version}. edit it again to revise it`);
+    return null;
+  }
 
   const prefix = (await quotePrefix(db, site, m)) ?? (await linkPrefix(db, site, m));
   const md = (prefix?.md ?? "") + (prefix?.rest ?? m.text).trim();
@@ -227,7 +232,7 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
     const { held } = edited;
     if (held.asked) return null;
     return async () => {
-      const asked = await reply(cfg, m, `held v${held.version}: what changed? reply to this with a changelog note and the edit publishes with it. edit again first to change it, or edit it back to drop it`);
+      const asked = await reply(cfg, m, `held v${held.version}: what changed? reply to this with a changelog note and the edit publishes with it. edit again first to change it; reply /discard, or leave it ${HOLD_MINUTES} minutes, to drop it`);
       if (asked.ok) await askedAbout(db, held.id, (asked.result as { message_id: number }).message_id);
     };
   }
@@ -238,7 +243,7 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   };
 }
 
-const PUB_USAGE = "reply to a published post with /note <what you're changing> before editing it, /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); /file <collection>, /unfile <collection>, /page <menu label> or /unpage; reply to a draft with /publish or /discard";
+const PUB_USAGE = "reply to a published post with /note <what you're changing> before editing it, /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); /file <collection>, /unfile <collection>, /page <menu label> or /unpage; reply to a draft with /publish or /discard, or /discard a held edit";
 
 // the post a command names: the message it replies to, else a link or id as the first argument
 // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
@@ -253,6 +258,18 @@ async function target(m: TgMessage, db: D1Database, args: string[]) {
 async function handlePubCommand(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
   const [command, ...args] = m.text!.trim().split(/\s+/);
   const name = command.slice(1).split("@")[0].toLowerCase();
+  if (name === "discard") {
+    // a held edit: dropped by replying to blyxt's question, or to the post
+    const to = m.reply_to_message?.message_id;
+    const asked = to ? await heldForAsk(db, m.chat.id, to) : null;
+    const post = !asked && to ? await itemForMessage(db, m.chat.id, to) : null;
+    const held = asked ?? (post ? await heldFor(db, post.item_id) : null);
+    if (held) {
+      if (held.state !== "held") return () => reply(cfg, m, "nothing held: that edit was already published or dropped");
+      await dropHeld(db, held);
+      return () => reply(cfg, m, `dropped the held edit: the post stays at v${held.base_version}. your message still shows the edit; edit it again to revise`);
+    }
+  }
   if (name === "publish" || name === "discard") return handleDraftCommand(m, name, db, site, cfg, args.join(" "));
   if (!["note", "withdraw", "republish", "pin", "file", "unfile", "page", "unpage"].includes(name)) return () => reply(cfg, m, PUB_USAGE);
   const id = await target(m, db, args);
@@ -295,6 +312,18 @@ async function handleHome(m: TgMessage, name: string, id: string, arg: string, d
   const filed = await file(db, id, arg);
   if (!filed) return () => reply(cfg, m, "a collection name needs a letter or digit");
   return () => reply(cfg, m, `${filed.added ? "filed in" : "already in"} ${filed.name} → ${site.origin}h/${encodeURIComponent(filed.slug)}/`);
+}
+
+// from the cron: holds left unanswered are dropped, and their questions say so
+export async function expireHeldEdits(db: D1Database, cfg: Pick<Config, "token">) {
+  for (const held of await expireHolds(db)) {
+    if (!held.ask_message_id) continue;
+    await tg(cfg.token, "editMessageText", {
+      chat_id: held.chat_id,
+      message_id: held.ask_message_id,
+      text: `dropped v${held.base_version + 1}: no note within ${HOLD_MINUTES} minutes, so the post stays at v${held.base_version}. edit it again to revise it`,
+    });
+  }
 }
 
 // a held edit publishes as the next version, with the owner's note

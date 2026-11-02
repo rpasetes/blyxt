@@ -3,7 +3,7 @@ import { itemDocument } from "../src/blyg";
 import { handleDraftRequest } from "../src/drafts";
 import { NOTE_MODEL, reproducesRemoved, writeNote } from "../src/notes";
 import { changelog, getItem } from "../src/store";
-import { handleUpdate, type TgMessage } from "../src/telegram";
+import { expireHeldEdits, handleUpdate, type TgMessage } from "../src/telegram";
 import { d1 } from "./d1";
 
 const SITE = { origin: "https://me.example/blyg/", title: "me", subtitle: "", author: { name: "me", url: "https://me.example/" } };
@@ -13,6 +13,7 @@ const HAIKU = "https://api.anthropic.com/v1/messages";
 // Telegram (numbering the bot's messages from 900) and, when answer is given, the Anthropic API answering with it
 function network(answer?: string | (() => Response | Promise<Response>)) {
   const sent: string[] = [];
+  const edits: { chat_id: number; message_id: number; text: string }[] = [];
   const asked: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
   let next = 900;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -23,9 +24,10 @@ function network(answer?: string | (() => Response | Promise<Response>)) {
       return Response.json({ content: [{ type: "text", text: answer ?? "" }] });
     }
     if (url.endsWith("/sendMessage")) sent.push(JSON.parse(String(init?.body)).text);
+    if (url.endsWith("/editMessageText")) edits.push(JSON.parse(String(init?.body)));
     return Response.json({ ok: true, result: { message_id: next++ } });
   }) as typeof fetch;
-  return { sent, asked };
+  return { sent, asked, edits };
 }
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -155,5 +157,43 @@ test("a revision draft with no note asks for one at /publish, takes it there, or
     expect(sent.at(-1)).toBe("not published: this revision has no changelog note. reply /publish <what changed> to publish it with yours");
     await pub(db, key, "/publish added the afternoon", replyTo(message_id, 500));
     expect((await doc(db)).changelog[1]).toEqual({ version: 2, at: expect.any(String), note: "added the afternoon" });
+  }
+});
+
+test("a hold nobody answers is dropped after an hour, its question says so, and a late note is told it's too late", async () => {
+  const db = d1();
+  const { sent, edits } = network();
+  const post = await pub(db, undefined, "first take");
+  await pub(db, undefined, "second take", {}, post);
+  const ask = 901;
+  // not yet: the cron leaves a fresh hold alone
+  await expireHeldEdits(db, { token: "t" });
+  expect(edits).toHaveLength(0);
+  db.sqlite.query("UPDATE held_edits SET at = '2026-01-01T00:00:00Z'").run();
+  await expireHeldEdits(db, { token: "t" });
+  expect(edits).toEqual([{ chat_id: -100, message_id: ask, text: "dropped v2: no note within 60 minutes, so the post stays at v1. edit it again to revise it" }]);
+  await expireHeldEdits(db, { token: "t" });
+  expect(edits).toHaveLength(1);
+  await pub(db, undefined, "sharpened it", replyTo(ask, 0));
+  expect(sent.at(-1)).toBe("that edit was dropped, so the post stays at v1. edit it again to revise it");
+  expect(await notes(db)).toEqual([null]);
+  expect(db.sqlite.query("SELECT COUNT(*) AS n FROM items").get()).toEqual({ n: 1 });
+  // editing again holds afresh
+  await pub(db, undefined, "third take", {}, post);
+  expect(sent.at(-1)).toStartWith("held v2: what changed?");
+});
+
+test("/discard drops a hold, replying to the question or to the post", async () => {
+  for (const to of ["ask", "post"] as const) {
+    const db = d1();
+    const { sent } = network();
+    const post = await pub(db, undefined, "first take");
+    await pub(db, undefined, "second take", {}, post);
+    await pub(db, undefined, "/discard", replyTo(to === "ask" ? 901 : post, to === "ask" ? 0 : 1));
+    expect(sent.at(-1)).toBe("dropped the held edit: the post stays at v1. your message still shows the edit; edit it again to revise");
+    expect(db.sqlite.query("SELECT state FROM held_edits").all()).toEqual([{ state: "dropped" }]);
+    expect((await getItem(db, only(db)))!.content_md).toBe("first take");
+    await pub(db, undefined, "/discard", replyTo(901, 0));
+    expect(sent.at(-1)).toBe("nothing held: that edit was already published or dropped");
   }
 });

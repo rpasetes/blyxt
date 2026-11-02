@@ -171,6 +171,18 @@ export const heldForAsk = (db: D1Database, chatId: number, messageId: number) =>
 export const askedAbout = (db: D1Database, heldId: number, messageId: number) =>
   db.prepare("UPDATE held_edits SET ask_message_id = ? WHERE id = ?").bind(messageId, heldId).run();
 
+// a held edit nobody writes a note for is dropped after this long (each edit restarts it): the post stays as published
+export const HOLD_MINUTES = 60;
+
+// drop the holds that waited too long, returning them so their questions can say so
+export async function expireHolds(db: D1Database) {
+  const cutoff = new Date(Date.now() - HOLD_MINUTES * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const { results } = await db.prepare("UPDATE held_edits SET state = 'dropped' WHERE state = 'held' AND at <= ? RETURNING *").bind(cutoff).all<Held>();
+  return results;
+}
+
+export const dropHeld = (db: D1Database, held: Held) => db.prepare("UPDATE held_edits SET state = 'dropped' WHERE id = ? AND state = 'held'").bind(held.id).run();
+
 // a held edit becomes the next version with the owner's note; null (and dropped) when the post moved on since
 export async function publishHeld(db: D1Database, held: Held, note: string) {
   const item = await getItem(db, held.item_id);
