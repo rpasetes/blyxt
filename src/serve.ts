@@ -1,12 +1,13 @@
 // Read side of the blyg: every protocol surface, rendered from D1 on request.
-import { archiveIndex, archivePage, collectionPage, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, pinnedDocument, pinnedPage, type Item, type Site } from "./blyg";
-import { collection, collectionItems, menuOf } from "./home";
+import { archiveIndex, archivePage, blogrollOpml, collectionPage, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, pinnedDocument, pinnedPage, type Item, type Site } from "./blyg";
+import { blogroll, collection, collectionItems, menuOf } from "./home";
 import { LAYERS, paceHistory, paceLayered } from "./pace";
 import { changelog, getItem, getPinned, lastUpdated, listItems, recentEvents } from "./store";
 
 const TYPES = {
   json: "application/json; charset=utf-8",
   xml: "application/rss+xml; charset=utf-8",
+  opml: "text/x-opml; charset=utf-8",
   html: "text/html; charset=utf-8",
 };
 
@@ -36,7 +37,11 @@ export async function serveBlyg(req: Request, db: D1Database, site: Site, path: 
     return respond(req, indexPage(site, order), "html");
   }
   if (path === "archive/") return respond(req, archivePage(site, await listItems(db)), "html");
-  if (path === "blyg.json") return json(req, manifest(site, await lastUpdated(db)));
+  if (path === "blyg.json") return json(req, manifest(site, await lastUpdated(db), (await blogroll(db)).length > 0));
+  if (path === "blogroll.opml") {
+    const rolled = await blogroll(db);
+    return rolled.length ? respond(req, blogrollOpml(site, rolled), "opml") : notFound(path);
+  }
   if (path === "items/index.json") {
     const items = await listItems(db);
     return json(req, archiveIndex(items, items[0]?.updated ?? (await lastUpdated(db))));

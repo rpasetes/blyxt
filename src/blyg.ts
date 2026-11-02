@@ -16,7 +16,8 @@ export type Site = {
   menu?: Menu;
 };
 
-export type Menu = { pages: { label: string; url: string }[]; collections: { name: string; url: string; count: number }[] };
+export type Rolled = { title: string; xmlUrl: string; htmlUrl?: string };
+export type Menu = { blogroll: Rolled[]; pages: { label: string; url: string }[]; collections: { name: string; url: string; count: number }[] };
 
 export type Item = {
   id: string;
@@ -225,7 +226,8 @@ export function excerpt(md: string, n = 80) {
 // the byline every item carries (§5.5), exactly as published so far: bio, avatar and links are the manifest's only
 const byline = (site: Site) => ({ name: site.author.name, url: site.author.url });
 
-export function manifest(site: Site, updated: string) {
+// blogroll: whether blogroll.opml has anything to serve (§11: an empty one is a 404 and no key)
+export function manifest(site: Site, updated: string, blogroll = false) {
   return {
     blyg: "0.4",
     level: 2,
@@ -236,6 +238,7 @@ export function manifest(site: Site, updated: string) {
     author: site.author,
     feed: "feed.xml",
     items: "items/index.json",
+    ...(blogroll ? { blogroll: "blogroll.opml" } : {}),
     updated,
   };
 }
@@ -351,7 +354,7 @@ function layout(site: Site, title: string, head: string, body: string) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${esc(title)}</title>
   <link rel="blyg" href="${esc(site.origin)}">
-  <link rel="alternate" type="application/rss+xml" title="${esc(site.title)}" href="${esc(site.origin)}feed.xml">
+  <link rel="alternate" type="application/rss+xml" title="${esc(site.title)}" href="${esc(site.origin)}feed.xml">${site.menu?.blogroll.length ? `\n  <link rel="blogroll" href="${esc(site.origin)}blogroll.opml">` : ""}
 ${head}
   <style>
     body { max-width: 38rem; margin: 2rem auto; padding: 0 1rem; font: 17px/1.55 Georgia, serif; color: #222; background: #fdfcf8; }
@@ -371,6 +374,7 @@ ${head}
 <body>
 ${masthead(site)}
 ${menu(site)}${body}
+<footer class="meta"><p><a href="https://blygger.org/">made with blygger</a> · <a href="https://blygger.com/">find more blygs</a></p></footer>
 </body>
 </html>
 `;
@@ -389,10 +393,10 @@ function masthead(site: Site) {
 
 function menu(site: Site) {
   const m = site.menu;
-  if (!m || (!m.pages.length && !m.collections.length)) return "";
+  if (!m || (!m.pages.length && !m.collections.length && !m.blogroll.length)) return "";
   const row = (label: string, links: string[]) => links.length ? `<p><span class="label">${label}:</span> ${links.join(" · ")}</p>\n` : "";
   return `<nav class="menu" aria-label="menu">
-${row("pages", m.pages.map((p) => `<a href="${esc(p.url)}">${esc(p.label)}</a>`))}${row("collections", m.collections.map((c) => `<a href="${esc(c.url)}">${esc(c.name)}</a> <span class="label">${c.count}</span>`))}</nav>
+${row("pages", m.pages.map((p) => `<a href="${esc(p.url)}">${esc(p.label)}</a>`))}${row("collections", m.collections.map((c) => `<a href="${esc(c.url)}">${esc(c.name)}</a> <span class="label">${c.count}</span>`))}${row("reading", m.blogroll.map((r) => `<a href="${esc(r.htmlUrl ?? r.xmlUrl)}">${esc(r.title)}</a>`).concat(m.blogroll.length ? [`<a href="${esc(site.origin)}blogroll.opml">opml</a>`] : []))}</nav>
 `;
 }
 
@@ -402,6 +406,19 @@ const article = (site: Site, i: Item, layer?: string) =>
 // h/{slug}/: one collection, newest first; presentation, outside the protocol's paths (§4)
 export function collectionPage(site: Site, name: string, items: Item[]) {
   return layout(site, `${name} · ${site.title}`, `  <meta name="description" content="${esc(name)}">`, `<h2>${esc(name)}</h2>\n${items.map((i) => article(site, i)).join("\n") || `<p class="meta">nothing here now</p>`}`);
+}
+
+// blogroll.opml (§11): OPML 2.0, no extensions
+export function blogrollOpml(site: Site, rolled: Rolled[]) {
+  const outline = (r: Rolled) => `    <outline type="rss" text="${esc(r.title)}" title="${esc(r.title)}" xmlUrl="${esc(r.xmlUrl)}"${r.htmlUrl ? ` htmlUrl="${esc(r.htmlUrl)}"` : ""} />`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>${esc(site.title)} blogroll</title></head>
+  <body>
+${rolled.map(outline).join("\n")}
+  </body>
+</opml>
+`;
 }
 
 // the live page cites only versions promised forever: itself and its pins (§8.4)

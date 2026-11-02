@@ -67,3 +67,52 @@ test("/file and /page shape the home page's menu and h/ pages, and publish nothi
   await send(db, "/unfile Feed Theory", post);
   expect(replies.at(-1)).toBe("taken out of Feed Theory");
 });
+
+async function subCommand(db: ReturnType<typeof d1>, text: string) {
+  const message: TgMessage = { message_id: nextId++, message_thread_id: 3, from: { id: 1 }, chat: { id: -100 }, text };
+  const after = await handleUpdate({ update_id: nextId++, message }, db, SITE, CFG);
+  await after?.();
+}
+
+test("the blogroll is opt-in per blyg (§11): /roll adds one, unrolling or unsubscribing the last empties it to a 404", async () => {
+  const db = d1();
+  const replies = bot();
+  db.sqlite.exec(`
+    INSERT INTO sub_topics (topic_id, name, created) VALUES (3, 'Sub', '2026-11-01T00:00:00Z');
+    INSERT INTO subscriptions (origin, title, index_url, created, next_poll, feed_url) VALUES
+      ('https://them.example/blyg/', 'Them & Co', 'https://them.example/blyg/items/index.json', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', 'https://them.example/blyg/rss'),
+      ('https://old.example/feed.xml', 'Old Blog', 'https://old.example/feed.xml', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', 'https://old.example/feed.xml');
+    UPDATE subscriptions SET legacy = 1 WHERE origin = 'https://old.example/feed.xml';
+    INSERT INTO follows (topic_id, origin, created) VALUES (3, 'https://them.example/blyg/', '2026-11-01T00:00:00Z'), (3, 'https://old.example/feed.xml', '2026-11-01T00:00:00Z');
+  `);
+  // nothing is shown until the owner says so
+  expect((await get(db, "blogroll.opml")).status).toBe(404);
+  expect(JSON.parse((await get(db, "blyg.json")).body).blogroll).toBeUndefined();
+  expect((await get(db, "")).body).not.toContain(`rel="blogroll"`);
+
+  await subCommand(db, "/roll them.example/blyg");
+  await subCommand(db, "/roll https://old.example/feed.xml");
+  expect(replies.slice(-2)).toEqual(["Them & Co is in the blogroll", "Old Blog is in the blogroll"]);
+  const opml = await serveBlyg(new Request(SITE.origin + "blogroll.opml"), db, SITE, "blogroll.opml");
+  expect(opml.headers.get("access-control-allow-origin")).toBe("*");
+  expect(opml.headers.get("etag")).toBeTruthy();
+  expect(await opml.text()).toBe(`<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>me blogroll</title></head>
+  <body>
+    <outline type="rss" text="Old Blog" title="Old Blog" xmlUrl="https://old.example/feed.xml" />
+    <outline type="rss" text="Them &amp; Co" title="Them &amp; Co" xmlUrl="https://them.example/blyg/rss" htmlUrl="https://them.example/blyg/" />
+  </body>
+</opml>
+`);
+  expect(JSON.parse((await get(db, "blyg.json")).body).blogroll).toBe("blogroll.opml");
+  const home = (await get(db, "")).body;
+  expect(home).toContain(`<link rel="blogroll" href="https://me.example/blyg/blogroll.opml">`);
+  expect(home).toContain(`<a href="https://them.example/blyg/">Them &amp; Co</a>`);
+
+  await subCommand(db, "/unroll https://old.example/feed.xml");
+  await subCommand(db, "/unsubscribe https://them.example/blyg/");
+  expect((await get(db, "blogroll.opml")).status).toBe(404);
+  expect(JSON.parse((await get(db, "blyg.json")).body).blogroll).toBeUndefined();
+  expect((await get(db, "")).body).not.toContain(`rel="blogroll"`);
+});

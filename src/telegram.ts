@@ -3,7 +3,7 @@
 import { FRAGMENT_CAP, ID_RE, overCap, pagePath, textContent, type Site, type StubOf } from "./blyg";
 import { compose, labelFor } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
-import { file, setPage, unfile } from "./home";
+import { blogroll, file, setPage, setRolled, unfile } from "./home";
 import { mention } from "./mentions";
 import { writeNote } from "./notes";
 import { resolve } from "./resolve";
@@ -438,7 +438,7 @@ async function handlePin(m: TgMessage, pinned: TgMessage | null, id: string | nu
   return () => reply(cfg, m, `pinned v${version} → ${page}v${version}/\nthis version stays readable forever, through edits and withdrawal. a pin can't be undone; unpinning in Telegram doesn't change it`);
 }
 
-const USAGE = "/subscribe <url> · /unsubscribe <url> · /subscriptions · /newsub <name> · /sub <name>";
+const USAGE = "/subscribe <url> · /unsubscribe <url> · /subscriptions · /newsub <name> · /sub <name> · /roll [url] · /unroll <url>";
 
 async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
   const [, ...args] = m.text!.trim().split(/\s+/);
@@ -506,6 +506,20 @@ async function handleSubCommand(m: TgMessage, db: D1Database, cfg: Config) {
     } catch (e) {
       return reply(cfg, m, `found a blyg at ${found.origin} but couldn't read its archive: ${(e as Error).message}`);
     }
+  }
+
+  // the blogroll is opt-in per blyg (§11): /roll <url> shows one on the home page and in blogroll.opml
+  if (name === "roll" || name === "unroll") {
+    if (!arg) {
+      if (name === "unroll") return reply(cfg, m, "usage: /unroll <url>");
+      const rolled = await blogroll(db);
+      return reply(cfg, m, rolled.length ? `in the blogroll:\n${rolled.map((r) => `• ${r.title} — ${r.htmlUrl ?? r.xmlUrl}`).join("\n")}` : "the blogroll is empty: /roll <url> adds a blyg you follow");
+    }
+    const all = (await listAllSubscriptions(db)).filter((s) => s.origin);
+    const found = all.find((s) => sameBlyg(s.origin!, arg));
+    if (!found) return reply(cfg, m, `not subscribed to ${arg}`);
+    await setRolled(db, found.origin!, name === "roll");
+    return reply(cfg, m, name === "roll" ? `${found.title} is in the blogroll` : `${found.title} is out of the blogroll`);
   }
 
   if (name === "unsubscribe") {

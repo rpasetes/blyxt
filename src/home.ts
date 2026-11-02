@@ -1,6 +1,6 @@
 // The home page's furniture: collections (/file) and menu pages (/page). Presentation only, held beside the
 // items and never in them, so filing or listing a post publishes nothing and makes no version.
-import { now, pagePath, type Item, type Menu, type Site } from "./blyg";
+import { now, pagePath, type Item, type Menu, type Rolled, type Site } from "./blyg";
 
 // "Variegated Demand Theory" → variegated-demand-theory
 export const slugOf = (name: string) => name.toLowerCase().normalize("NFKD").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60);
@@ -48,7 +48,24 @@ export async function menuOf(db: D1Database, site: Site): Promise<Menu> {
      WHERE i.kind != 'withdrawn' GROUP BY c.slug ORDER BY c.name COLLATE NOCASE`,
   ).all<{ slug: string; name: string; n: number }>();
   return {
+    blogroll: await blogroll(db),
     pages: pages.results.map((p) => ({ label: p.label, url: site.origin + pagePath(p) })),
     collections: collections.results.map((c) => ({ name: c.name, url: `${site.origin}h/${encodeURIComponent(c.slug)}/`, count: c.n })),
   };
+}
+
+// the blogroll (§11): followed blygs the owner chose to show, by title. A blyg's xmlUrl is the feed its
+// manifest names (feed_url, refreshed daily), its htmlUrl the origin; a plain RSS feed's origin is its feed
+// URL, so it has no htmlUrl rather than a wrong one. A followed blyg that moved still lists at the origin
+// blyxt follows, because that is what's followed until the owner resubscribes
+export async function blogroll(db: D1Database): Promise<Rolled[]> {
+  const { results } = await db.prepare("SELECT origin, title, feed_url, legacy FROM subscriptions WHERE blogroll = 1 ORDER BY title COLLATE NOCASE, origin")
+    .all<{ origin: string; title: string; feed_url: string | null; legacy: number }>();
+  return results.map((r) => r.legacy
+    ? { title: r.title, xmlUrl: r.feed_url ?? r.origin }
+    : { title: r.title, xmlUrl: r.feed_url ?? new URL("feed.xml", r.origin).href, htmlUrl: r.origin });
+}
+
+export async function setRolled(db: D1Database, origin: string, on: boolean) {
+  await db.prepare("UPDATE subscriptions SET blogroll = ? WHERE origin = ?").bind(on ? 1 : 0, origin).run();
 }
