@@ -363,6 +363,7 @@ ${head}
     .masthead { display: flex; gap: .9rem; align-items: center; margin-bottom: 1.5rem; }
     .masthead img { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; flex: none; }
     nav.menu { font: 14px/1.6 ui-monospace, monospace; margin-bottom: 1rem; } nav.menu p { margin: 0; } nav.menu .label { color: #777; }
+    ul.archive { list-style: none; padding: 0; } ul.archive li { padding: .45rem 0; border-top: 1px solid #e5e0d5; }
     .masthead p { margin: 0; } .site-name { font-size: 1.35rem; } .site-name a { color: inherit; text-decoration: none; }
     @media (prefers-color-scheme: dark) { body { color: #ddd; background: #161512; } a { color: #e08a5f; } article { border-color: #333; } .blyg-transclusion { background: #1f1d19; border-left-color: #e08a5f; } }
   </style>
@@ -395,12 +396,12 @@ ${row("pages", m.pages.map((p) => `<a href="${esc(p.url)}">${esc(p.label)}</a>`)
 `;
 }
 
-const article = (site: Site, i: Item) =>
-  `<article>${i.content_html}<p class="meta"><a href="${esc(site.origin + pagePath(i))}">v${i.version} · ${i.updated}</a></p></article>`;
+const article = (site: Site, i: Item, layer?: string) =>
+  `<article>${i.content_html}<p class="meta"><a href="${esc(site.origin + pagePath(i))}">v${i.version} · ${i.updated}</a>${layer ? ` · ${layer}` : ""}</p></article>`;
 
 // h/{slug}/: one collection, newest first; presentation, outside the protocol's paths (§4)
 export function collectionPage(site: Site, name: string, items: Item[]) {
-  return layout(site, `${name} · ${site.title}`, `  <meta name="description" content="${esc(name)}">`, `<h2>${esc(name)}</h2>\n${items.map((i) => article(site, i)).join("\n")}`);
+  return layout(site, `${name} · ${site.title}`, `  <meta name="description" content="${esc(name)}">`, `<h2>${esc(name)}</h2>\n${items.map((i) => article(site, i)).join("\n") || `<p class="meta">nothing here now</p>`}`);
 }
 
 // the live page cites only versions promised forever: itself and its pins (§8.4)
@@ -442,11 +443,21 @@ export function pinnedPage(site: Site, item: Item, v: Version & Pick<Item, "cont
   return layout(site, `${excerpt(v.content_md, 60) || site.title} (v${v.version})`, head, body);
 }
 
-export function indexPage(site: Site, items: Item[]) {
+// the home page, pace-layered (src/pace.ts): each post's layer shows beside its version
+export function indexPage(site: Site, items: (Item & { layer?: string })[]) {
   const list = items
     .filter((i) => i.kind !== "withdrawn")
-    .map((i) => article(site, i))
+    .map((i) => article(site, i, i.layer))
     .join("\n");
   const image = site.author.avatar ? `\n  <meta property="og:image" content="${esc(new URL(site.author.avatar, site.origin).href)}">` : "";
-  return layout(site, site.title, `  <meta name="description" content="${esc(site.subtitle)}">${image}`, list);
+  return layout(site, site.title, `  <meta name="description" content="${esc(site.subtitle)}">${image}`, `${list}\n<p class="meta"><a href="${esc(site.origin)}archive/">everything, newest first</a></p>`);
+}
+
+// archive/: the synchronic view, every post newest first, one line each
+export function archivePage(site: Site, items: Item[]) {
+  const list = items
+    .filter((i) => i.kind !== "withdrawn")
+    .map((i) => `<li><a href="${esc(site.origin + pagePath(i))}">${esc(excerpt(i.content_md, 80) || i.id)}</a> <span class="meta">${i.authored_kind} · v${i.version} · ${i.updated.slice(0, 10)}</span></li>`)
+    .join("\n");
+  return layout(site, `archive · ${site.title}`, `  <meta name="description" content="everything on ${esc(site.title)}, newest first">`, `<h2>archive</h2>\n<ul class="archive">\n${list}\n</ul>`);
 }

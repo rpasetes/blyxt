@@ -1,6 +1,7 @@
 // Read side of the blyg: every protocol surface, rendered from D1 on request.
-import { archiveIndex, collectionPage, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, pinnedDocument, pinnedPage, type Item, type Site } from "./blyg";
+import { archiveIndex, archivePage, collectionPage, feed, FEED_WINDOW, ID_RE, indexPage, itemDocument, itemPage, manifest, pagePath, pinnedDocument, pinnedPage, type Item, type Site } from "./blyg";
 import { collection, collectionItems, menuOf } from "./home";
+import { LAYERS, paceHistory, paceLayered } from "./pace";
 import { changelog, getItem, getPinned, lastUpdated, listItems, recentEvents } from "./store";
 
 const TYPES = {
@@ -29,7 +30,12 @@ const notFound = (path = "") => new Response(`not found: /${path}\n`, { status: 
 export async function serveBlyg(req: Request, db: D1Database, site: Site, path: string) {
   // HTML pages carry the menu; documents never see it
   if (path === "" || path === "index.html" || /\/$/.test(path)) site = { ...site, menu: await menuOf(db, site) };
-  if (path === "" || path === "index.html") return respond(req, indexPage(site, await listItems(db)), "html");
+  if (path === "" || path === "index.html") {
+    const items = new Map((await listItems(db)).map((i) => [i.id, i]));
+    const order = paceLayered(await paceHistory(db)).flatMap(({ id, layer }) => (items.has(id) ? [{ ...items.get(id)!, layer: LAYERS[layer] }] : []));
+    return respond(req, indexPage(site, order), "html");
+  }
+  if (path === "archive/") return respond(req, archivePage(site, await listItems(db)), "html");
   if (path === "blyg.json") return json(req, manifest(site, await lastUpdated(db)));
   if (path === "items/index.json") {
     const items = await listItems(db);
