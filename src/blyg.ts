@@ -10,7 +10,8 @@ export type Site = {
   origin: string;
   title: string;
   subtitle: string;
-  author: { name: string; url: string };
+  // the publication identity (§6.1); avatar is origin-relative, served from public/
+  author: { name: string; url: string; bio?: string; avatar?: string; links?: { label: string; url: string }[] };
 };
 
 export type Item = {
@@ -217,6 +218,9 @@ export function excerpt(md: string, n = 80) {
   return s.length > n ? s.slice(0, n).trimEnd() + "…" : s;
 }
 
+// the byline every item carries (§5.5), exactly as published so far: bio, avatar and links are the manifest's only
+const byline = (site: Site) => ({ name: site.author.name, url: site.author.url });
+
 export function manifest(site: Site, updated: string) {
   return {
     blyg: "0.4",
@@ -239,7 +243,7 @@ export function itemDocument(site: Site, item: Item, changelog: Version[]) {
     kind: item.kind,
     origin: site.origin,
     page: pagePath(item),
-    author: site.author,
+    author: byline(site),
     created: item.created,
     updated: item.updated,
     version: item.version,
@@ -276,7 +280,7 @@ export function pinnedDocument(site: Site, v: Version & Pick<Item, "content_md" 
     note: v.note,
     pinned: true,
     origin: site.origin,
-    author: site.author,
+    author: byline(site),
     content_md: v.content_md,
     content_html: absolutize(v.content_html, site.origin),
     content_hash: v.content_hash,
@@ -352,14 +356,29 @@ ${head}
     blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid #e5e0d5; }
     .blyg-transclusion { margin: 1rem 0; padding: .1rem 1rem; background: #f4f1e8; border-left-color: #a0451f; }
     .blyg-partial { font-style: italic; }
+    .masthead { display: flex; gap: .9rem; align-items: center; margin-bottom: 1.5rem; }
+    .masthead img { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; flex: none; }
+    .masthead p { margin: 0; } .site-name { font-size: 1.35rem; } .site-name a { color: inherit; text-decoration: none; }
     @media (prefers-color-scheme: dark) { body { color: #ddd; background: #161512; } a { color: #e08a5f; } article { border-color: #333; } .blyg-transclusion { background: #1f1d19; border-left-color: #e08a5f; } }
   </style>
 </head>
 <body>
+${masthead(site)}
 ${body}
 </body>
 </html>
 `;
+}
+
+function masthead(site: Site) {
+  const a = site.author;
+  const avatar = a.avatar ? `<img class="avatar" src="${esc(new URL(a.avatar, site.origin).href)}" alt="" width="56" height="56">\n` : "";
+  const links = (a.links ?? []).map((l) => `<a href="${esc(l.url)}" rel="me">${esc(l.label)}</a>`);
+  return `<header class="masthead">${avatar}<div>
+<p class="site-name"><a href="${esc(site.origin)}">${esc(site.title)}</a></p>
+<p><em>${esc(site.subtitle)}</em></p>
+<p class="meta">${[...links, `<a href="${esc(site.origin)}feed.xml">rss</a>`, `<a href="${esc(site.origin)}blyg.json">blyg.json</a>`].join(" · ")}</p>
+</div></header>`;
 }
 
 // the live page cites only versions promised forever: itself and its pins (§8.4)
@@ -387,7 +406,7 @@ export function itemPage(site: Site, item: Item, pins: number[] = []) {
   const body = item.kind === "withdrawn"
     ? `<p class="meta">withdrawn · v${item.version}${pinCitations(site, item, pins)}</p>`
     : `<article>${respondsTo(item)}${item.content_html}<p class="meta">${item.kind} · v${item.version} · ${item.updated}${pinCitations(site, item, pins)}</p></article>`;
-  return layout(site, excerpt(item.content_md, 60) || site.title, head, `<p class="meta"><a href="${esc(site.origin)}">${esc(site.title)}</a></p>\n${body}`);
+  return layout(site, excerpt(item.content_md, 60) || site.title, head, body);
 }
 
 // {page}v{n}/: the human twin of a pin, visibly frozen, canonical to the live page (§8.4)
@@ -396,8 +415,7 @@ export function pinnedPage(site: Site, item: Item, v: Version & Pick<Item, "cont
   const head = `  <link rel="canonical" href="${esc(live)}">
   <link rel="alternate" type="application/json" href="${esc(site.origin)}items/${item.id}/v${v.version}.json">
   <meta name="description" content="${esc(excerpt(v.content_md, 200))}">`;
-  const body = `<p class="meta"><a href="${esc(site.origin)}">${esc(site.title)}</a></p>
-<p class="meta">frozen: v${v.version} as pinned, published ${v.at} · <a href="${esc(live)}">live version</a> · <a href="${esc(site.origin)}items/${item.id}/v${v.version}.json">json</a></p>
+  const body = `<p class="meta">frozen: v${v.version} as pinned, published ${v.at} · <a href="${esc(live)}">live version</a> · <a href="${esc(site.origin)}items/${item.id}/v${v.version}.json">json</a></p>
 <article>${absolutize(v.content_html, site.origin)}<p class="meta">${v.kind} · v${v.version}${v.note ? ` · ${esc(v.note)}` : ""}</p></article>`;
   return layout(site, `${excerpt(v.content_md, 60) || site.title} (v${v.version})`, head, body);
 }
@@ -407,5 +425,6 @@ export function indexPage(site: Site, items: Item[]) {
     .filter((i) => i.kind !== "withdrawn")
     .map((i) => `<article>${i.content_html}<p class="meta"><a href="${esc(site.origin + pagePath(i))}">v${i.version} · ${i.updated}</a></p></article>`)
     .join("\n");
-  return layout(site, site.title, `  <meta name="description" content="${esc(site.subtitle)}">`, `<h1>${esc(site.title)}</h1>\n<p><em>${esc(site.subtitle)}</em></p>\n<p class="meta"><a href="feed.xml">rss</a> · <a href="blyg.json">blyg.json</a></p>\n${list}`);
+  const image = site.author.avatar ? `\n  <meta property="og:image" content="${esc(new URL(site.author.avatar, site.origin).href)}">` : "";
+  return layout(site, site.title, `  <meta name="description" content="${esc(site.subtitle)}">${image}`, list);
 }

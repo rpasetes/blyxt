@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { contentHash, directives, textContent, excerpt, feed, ID_RE, itemDocument, itemPage, linkIds, manifest, newId, pagePath, pinnedDocument, render, type Item, type Site } from "../src/blyg";
+import { contentHash, directives, textContent, excerpt, feed, ID_RE, itemDocument, itemPage, indexPage, linkIds, manifest, newId, pagePath, pinnedDocument, render, type Item, type Site } from "../src/blyg";
 
 const site: Site = { origin: "https://example.com/blyg/", title: "t", subtitle: "s", author: { name: "a", url: "https://example.com/" } };
 const item: Item = {
@@ -144,4 +144,21 @@ test("documents declare 0.4; the manifest leaves item and pin out, since absent 
   expect(m).toMatchObject({ blyg: "0.4", feed: "feed.xml", items: "items/index.json" });
   expect("item" in m || "pin" in m).toBe(false);
   expect(itemDocument(site, item, []).blyg).toBe("0.4");
+});
+
+test("the masthead carries the author's avatar, absolute, on every page; the manifest names it origin-relative (§6.1)", () => {
+  const s: Site = { ...site, author: { ...site.author, avatar: "media/avatar.jpg", links: [{ label: "example.com", url: "https://example.com/" }] } };
+  expect(manifest(s, "2026-11-02T00:00:00Z").author).toEqual({ name: "a", url: "https://example.com/", avatar: "media/avatar.jpg", links: [{ label: "example.com", url: "https://example.com/" }] });
+  for (const html of [indexPage(s, [item]), itemPage(s, item)]) {
+    expect(html).toContain(`<img class="avatar" src="https://example.com/blyg/media/avatar.jpg"`);
+    expect(html).toContain(`<a href="https://example.com/" rel="me">example.com</a>`);
+  }
+  expect(indexPage(s, [item])).toContain(`<meta property="og:image" content="https://example.com/blyg/media/avatar.jpg">`);
+  expect(itemPage(site, item)).not.toContain("avatar");
+});
+
+test("items keep the {name, url} byline (§5.5): the masthead's bio, avatar and links stay in the manifest", () => {
+  const s: Site = { ...site, author: { ...site.author, bio: "b", avatar: "media/avatar.jpg", links: [{ label: "x", url: "https://x.example/" }] } };
+  expect(itemDocument(s, item, []).author).toEqual({ name: "a", url: "https://example.com/" });
+  expect(pinnedDocument(s, { ...item, item_id: item.id, at: item.created, note: null, pinned: 1 } as never).author).toEqual({ name: "a", url: "https://example.com/" });
 });

@@ -12,6 +12,9 @@ export type Env = {
   SITE_SUBTITLE: string;
   AUTHOR_NAME: string;
   AUTHOR_URL: string;
+  // origin-relative, served from public/ (static assets)
+  AUTHOR_AVATAR?: string;
+  AUTHOR_BIO?: string;
   TELEGRAM_CHAT_ID: string;
   PUB_TOPIC_ID: string;
   SUB_TOPIC_ID: string;
@@ -40,7 +43,13 @@ const siteOf = (env: Env): Site => ({
   origin: env.ORIGIN,
   title: env.SITE_TITLE,
   subtitle: env.SITE_SUBTITLE,
-  author: { name: env.AUTHOR_NAME, url: env.AUTHOR_URL },
+  author: {
+    name: env.AUTHOR_NAME,
+    url: env.AUTHOR_URL,
+    ...(env.AUTHOR_BIO ? { bio: env.AUTHOR_BIO } : {}),
+    ...(env.AUTHOR_AVATAR ? { avatar: env.AUTHOR_AVATAR } : {}),
+    links: [{ label: new URL(env.AUTHOR_URL).host, url: env.AUTHOR_URL }],
+  },
 });
 
 export default {

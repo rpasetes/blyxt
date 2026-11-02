@@ -12,6 +12,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // the avatar and other media, served before the Worker runs: public/media/x → {origin}media/x
+  "assets": { "directory": "public" },
   // poll followed blygs (§12.3)
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
@@ -21,6 +23,7 @@
     "SITE_SUBTITLE": "a blyg by Russell Antonie Pasetes",
     "AUTHOR_NAME": "Russell Antonie Pasetes",
     "AUTHOR_URL": "https://rslantonie.com/",
+    "AUTHOR_AVATAR": "media/avatar.jpg",
     // from `bun run discover`; 0 means unset
     "TELEGRAM_CHAT_ID": "-1003932920900",
     "PUB_TOPIC_ID": "2",
