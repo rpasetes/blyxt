@@ -169,6 +169,8 @@ test("a directive line ends the selection above it, never continuing the quote (
   expect(directives(`![[${A}]]\n> sel\nlazy\n![[${B}]]\n`)).toEqual([{ id: A, versioned: false, selection: "sel\nlazy" }, { id: B, versioned: false, selection: undefined }]);
   // the reserved form is read as a directive too, to be refused, never swallowed into the quote
   expect(directives(`![[${A}]]\n> sel\n![[${B}@v2]]\n`)).toEqual([{ id: A, versioned: false, selection: "sel" }, { id: B, versioned: true, selection: undefined }]);
+  // a quoted line is never a directive line, so a nested quote's lazy line stays nested, as markdown has it
+  expect(render(`> > nested\n> ![[${B}]]`)).toBe(`<blockquote>\n<blockquote>\n<p>nested</p>\n<p>![[${B}]]</p>\n</blockquote>\n</blockquote>\n`);
   // code stays code: a directive in a fence after a quote is text
   expect(directives("> q\n```\n![[" + A + "]]\n```\n")).toEqual([]);
 });

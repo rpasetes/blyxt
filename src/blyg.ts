@@ -130,17 +130,26 @@ type Context = { links: Map<string, LinkTarget>; quotes: Map<string, Snapshot> }
 // set synchronously around each parse, so concurrent requests never see each other's context
 let context: Context = { links: new Map(), quotes: new Map() };
 
+// how many blockquotes the tokenizer is inside
+let quoteDepth = 0;
+
 // chat text is plain text: raw HTML is shown, never interpreted; line breaks are kept
 const md = new Marked({
   breaks: true,
   tokenizer: {
     // a directive line is never a blockquote's lazy continuation: the grammar reads it before markdown does, so it
     // ends the selection above it (§10.1). Lines of the quote itself start with ">", so only lazy lines can match
+    // only at the top: inside a quote the ">" is already stripped, and "> ![[id]]" is no directive line
     blockquote(src: string) {
       const lines = src.split("\n");
-      const end = lines.findIndex((l, n) => n > 0 && DIRECTIVE_ONLY.test(l));
+      const end = quoteDepth ? -1 : lines.findIndex((l, n) => n > 0 && DIRECTIVE_ONLY.test(l));
       const cut = end < 0 ? src : lines.slice(0, end).join("\n") + "\n";
-      return Tokenizer.prototype.blockquote.call(this, cut) as Tokens.Blockquote | undefined;
+      quoteDepth++;
+      try {
+        return Tokenizer.prototype.blockquote.call(this, cut) as Tokens.Blockquote | undefined;
+      } finally {
+        quoteDepth--;
+      }
     },
   },
   renderer: { html: ({ text }) => esc(text) },
