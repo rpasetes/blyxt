@@ -1,6 +1,6 @@
 // Blygger 0.4 wire surface: ids, rendering, and the static documents.
 // Spec: https://blygger.org/spec/0.4/ (living text: blygger/blygger-spec docs/protocol-v0.4.md)
-import { Marked, type Token, type Tokens } from "marked";
+import { Marked, Tokenizer, type Token, type Tokens } from "marked";
 import { decode } from "./tghtml";
 
 export type Kind = "fragment" | "thread" | "withdrawn";
@@ -116,6 +116,8 @@ const LINK = new RegExp(String.raw`^(!?)\[\[([0-9a-z]{26})(@v\d+)?${LABEL}\]\]`)
 // a line that is only ![[id]] is a transclusion directive; blank lines after it detach a following blockquote
 const DIRECTIVE = new RegExp(String.raw`^[ \t]*!\[\[([0-9a-z]{26})(@v\d+)?${LABEL}\]\][ \t]*(?:\n|$)((?:[ \t]*\n)*)`);
 const DIRECTIVE_LINE = new RegExp(String.raw`(^|\n)[ \t]*!\[\[[0-9a-z]{26}(@v\d+)?${LABEL}\]\][ \t]*(\n|$)`);
+// a whole line that is a directive (or the reserved @vN form)
+const DIRECTIVE_ONLY = new RegExp(String.raw`^[ \t]*!\[\[[0-9a-z]{26}(@v\d+)?${LABEL}\]\][ \t]*$`);
 // whitespace around the pipe is trimmed, and an empty label is no label
 const labelOf = (raw: string | undefined) => raw?.trim() || undefined;
 type LinkToken = { type: "blygLink"; raw: string; id: string; live: boolean; label?: string };
@@ -131,6 +133,16 @@ let context: Context = { links: new Map(), quotes: new Map() };
 // chat text is plain text: raw HTML is shown, never interpreted; line breaks are kept
 const md = new Marked({
   breaks: true,
+  tokenizer: {
+    // a directive line is never a blockquote's lazy continuation: the grammar reads it before markdown does, so it
+    // ends the selection above it (§10.1). Lines of the quote itself start with ">", so only lazy lines can match
+    blockquote(src: string) {
+      const lines = src.split("\n");
+      const end = lines.findIndex((l, n) => n > 0 && DIRECTIVE_ONLY.test(l));
+      const cut = end < 0 ? src : lines.slice(0, end).join("\n") + "\n";
+      return Tokenizer.prototype.blockquote.call(this, cut) as Tokens.Blockquote | undefined;
+    },
+  },
   renderer: { html: ({ text }) => esc(text) },
   extensions: [{
     name: "blygLink",

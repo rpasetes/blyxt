@@ -162,3 +162,13 @@ test("items keep the {name, url} byline (§5.5): the masthead's bio, avatar and 
   expect(itemDocument(s, item, []).author).toEqual({ name: "a", url: "https://example.com/" });
   expect(pinnedDocument(s, { ...item, item_id: item.id, at: item.created, note: null, pinned: 1 } as never).author).toEqual({ name: "a", url: "https://example.com/" });
 });
+
+test("a directive line ends the selection above it, never continuing the quote (§10.1, ninth revision)", () => {
+  const A = "0000000000000000000000000a", B = "0000000000000000000000000b";
+  expect(directives(`![[${A}]]\n> sel line\n![[${B}]]\n`)).toEqual([{ id: A, versioned: false, selection: "sel line" }, { id: B, versioned: false, selection: undefined }]);
+  expect(directives(`![[${A}]]\n> sel\nlazy\n![[${B}]]\n`)).toEqual([{ id: A, versioned: false, selection: "sel\nlazy" }, { id: B, versioned: false, selection: undefined }]);
+  // the reserved form is read as a directive too, to be refused, never swallowed into the quote
+  expect(directives(`![[${A}]]\n> sel\n![[${B}@v2]]\n`)).toEqual([{ id: A, versioned: false, selection: "sel" }, { id: B, versioned: true, selection: undefined }]);
+  // code stays code: a directive in a fence after a quote is text
+  expect(directives("> q\n```\n![[" + A + "]]\n```\n")).toEqual([]);
+});
