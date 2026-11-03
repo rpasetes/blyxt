@@ -26,13 +26,13 @@ async function send(db: ReturnType<typeof d1>, text: string, edit?: number) {
 }
 const kinds = (db: ReturnType<typeof d1>) => db.sqlite.query("SELECT kind, version FROM items ORDER BY created, rowid").all();
 
-test("a message over the fragment cap publishes as a thread", async () => {
+test("a message over 1,024 characters publishes as a thread", async () => {
   const db = d1();
   const replies = bot();
-  await send(db, "é".repeat(2000)); // characters, not bytes or UTF-16 units
-  await send(db, "x".repeat(2001));
+  await send(db, "é".repeat(1024)); // characters, not bytes or UTF-16 units
+  await send(db, "x".repeat(1025));
   expect(kinds(db)).toEqual([{ kind: "fragment", version: 1 }, { kind: "thread", version: 1 }]);
-  expect(replies[1]).toStartWith("published thread v1 (over 2,000 characters) → https://me.example/blyg/t/");
+  expect(replies[1]).toStartWith("published thread v1 (over 1,024 characters) → https://me.example/blyg/t/");
 });
 
 test("a fragment edited past the cap is refused; a thread has no cap", async () => {
@@ -40,10 +40,13 @@ test("a fragment edited past the cap is refused; a thread has no cap", async () 
   const replies = bot();
   const fragment = await send(db, "short");
   const thread = await send(db, "x".repeat(2500));
+  // a fragment's edit may run past 1,024 (one published before that rule could already be longer), never past 2,000
+  await send(db, "y".repeat(1500), fragment);
   await send(db, "y".repeat(2001), fragment);
   await send(db, "y".repeat(3000), thread);
   // the thread's edit is accepted, and held for its changelog note
   expect(kinds(db)).toEqual([{ kind: "fragment", version: 1 }, { kind: "thread", version: 1 }]);
-  expect(replies[3]).toStartWith("held v2: what changed?");
-  expect(replies[2]).toBe("edit not published: fragments stay within 2,000 characters, and this is 2,001. trim it, or send it as a new message to publish a thread");
+  expect(replies[2]).toStartWith("held v2: what changed?");
+  expect(replies[4]).toStartWith("held v2: what changed?");
+  expect(replies[3]).toBe("edit not published: fragments stay within 2,000 characters, and this is 2,001. trim it, or send it as a new message to publish a thread");
 });

@@ -1,6 +1,6 @@
 // Drafts from other clients: POST /api/drafts puts a draft in Pub, and only the owner's /publish there
 // makes it an item. Telegram stays the point of publish; a leaked token can only propose.
-import { directives, FRAGMENT_CAP, ID_RE, newId, now, overCap, pagePath, type Generated, type Item, type Site } from "./blyg";
+import { directives, FRAGMENT_CAP, ID_RE, newId, now, overCap, pagePath, THREAD_AT, threadLength, type Generated, type Item, type Site } from "./blyg";
 import { compose, resolveQuote } from "./compose";
 import { getItem } from "./store";
 import { tg, type Config } from "./telegram";
@@ -108,7 +108,7 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
   const composed = await compose(db, site.origin, md, item?.id);
   if (!composed.ok) return fail(422, composed.error);
   if (composed.thread && item?.authored_kind === "fragment") return fail(400, "a fragment can't quote");
-  const kind = item ? item.authored_kind : composed.thread || overCap(md) ? "thread" : "fragment";
+  const kind = item ? item.authored_kind : composed.thread || threadLength(md) ? "thread" : "fragment";
 
   const draft: Draft = {
     id: newId(), content_md: md, generated: generated ? JSON.stringify([generated]) : null, created: now(), chat_id: cfg.chatId, message_id: null, file_message_id: null,
@@ -124,7 +124,7 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
         note ? `note${draft.note_generated ? " (written by the client)" : ""}: <i>${esc(note)}</i>` : "no note",
         `changes: ${changes(item.content_md, md)}`,
       ]
-    : [`📝 <b>draft</b> · ${kind}${kind === "thread" && chars > FRAGMENT_CAP ? ` (over ${FRAGMENT_CAP.toLocaleString("en")} characters)` : ""} · ${chars.toLocaleString("en")} characters`];
+    : [`📝 <b>draft</b> · ${kind}${kind === "thread" && chars > THREAD_AT ? ` (over ${THREAD_AT.toLocaleString("en")} characters)` : ""} · ${chars.toLocaleString("en")} characters`];
   if (generated) head.push(`generated${generated.model ? ` by ${esc(generated.model)}` : ""}: it publishes marked as machine-generated`);
   // a revision's preview replies to the post's latest message in Pub, so a post's drafts chain under it
   const under = item && (await db.prepare("SELECT message_id FROM tg_messages WHERE item_id = ? AND chat_id = ? ORDER BY message_id DESC LIMIT 1").bind(item.id, cfg.chatId).first<{ message_id: number }>());

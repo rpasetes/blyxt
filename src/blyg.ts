@@ -80,6 +80,11 @@ export const FEED_WINDOW = 50;
 // fragments SHOULD stay within 2,000 characters; threads have no cap (§5.3, §10.5)
 export const FRAGMENT_CAP = 2000;
 export const overCap = (md: string) => [...md].length > FRAGMENT_CAP;
+// a new post longer than this publishes as a thread: blyxt keeps fragments short, nearer the 1,000 the spec
+// recommends for studios (§5.3). Edits of an existing fragment are held only to the cap above, so a fragment
+// published before this changed can still be edited
+export const THREAD_AT = 1024;
+export const threadLength = (md: string) => [...md].length > THREAD_AT;
 
 export const now = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 

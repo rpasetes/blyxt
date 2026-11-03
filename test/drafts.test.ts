@@ -96,7 +96,7 @@ test("a long draft previews cut short with the whole markdown attached, and publ
   const calls = bot();
   const md = "word ".repeat(1000).trim();
   await submit(db, { content_md: md });
-  expect(String(calls[0].body.text)).toStartWith("📝 <b>draft</b> · thread (over 2,000 characters) · 4,999 characters\n\nword");
+  expect(String(calls[0].body.text)).toStartWith("📝 <b>draft</b> · thread (over 1,024 characters) · 4,999 characters\n\nword");
   expect(calls[1].method).toBe("sendDocument");
   expect(await (calls[1].body.document as File).text()).toBe(md);
   await command(db, "/publish", 501); // replying to the file works too
