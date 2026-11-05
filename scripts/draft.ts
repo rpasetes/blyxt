@@ -1,6 +1,7 @@
 // Sends a markdown file to Pub as a draft; it publishes only when you reply /publish to it there.
-//   bun run draft <file.md> [--generated-by <model>] [--source <id>@v<n> ...] [--update <id|link> [--note <text>] [--note-generated]]
+//   bun run draft <file.md> [--generated-by <model>] [--source <id>@v<n> ...] [--fragment] [--update <id|link> [--note <text>] [--note-generated]]
 // --generated-by marks the whole body machine-generated (§5.7); --source names a post it drew on: yours, or a followed blyg's at the version blyxt holds, which tells that blyg.
+// a new post is a thread; --fragment publishes it as a fragment (up to 2,000 characters, no quotes).
 // --update makes it a revision draft: publishing it makes that post's next version, with --note in its changelog
 // (--note-generated when the client wrote the note, not the author, §5.2).
 // Needs DRAFT_TOKEN (e.g. in .dev.vars); BLYXT_URL defaults to the deployed Worker.
@@ -14,6 +15,7 @@ const { positionals, values } = parseArgs({
     update: { type: "string" },
     note: { type: "string" },
     "note-generated": { type: "boolean" },
+    fragment: { type: "boolean" },
   },
 });
 const [file] = positionals;
@@ -36,6 +38,7 @@ const res = await fetch(new URL("/api/drafts", base), {
   body: JSON.stringify({
     content_md: await Bun.file(file).text(),
     generated,
+    ...(values.fragment ? { fragment: true } : {}),
     ...(values.update ? { update: values.update, note: values.note, note_generated: !!values["note-generated"] } : {}),
   }),
 });

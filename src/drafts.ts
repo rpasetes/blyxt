@@ -1,6 +1,6 @@
 // Drafts from other clients: POST /api/drafts puts a draft in Pub, and only the owner's /publish there
 // makes it an item. Telegram stays the point of publish; a leaked token can only propose.
-import { directives, FRAGMENT_CAP, ID_RE, newId, now, overCap, pagePath, THREAD_AT, threadLength, type Generated, type Item, type Site } from "./blyg";
+import { directives, FRAGMENT_CAP, ID_RE, newId, now, overCap, pagePath, type Generated, type Item, type Site } from "./blyg";
 import { compose, resolveQuote } from "./compose";
 import { getItem } from "./store";
 import { tg, type Config } from "./telegram";
@@ -19,6 +19,8 @@ export type Draft = {
   base_version: number | null;
   note: string | null;
   note_generated: number;
+  // a new post's flag: a fragment, else it publishes as a thread
+  fragment: number;
 };
 
 const MAX_DRAFT = 100_000;
@@ -77,7 +79,7 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
   if (req.method !== "POST") return new Response("method not allowed\n", { status: 405 });
   if (!authorized(req, token)) return fail(401, "unauthorized");
 
-  const body = (await req.json().catch(() => null)) as { content_md?: unknown; generated?: unknown; update?: unknown; note?: unknown; note_generated?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as { content_md?: unknown; generated?: unknown; update?: unknown; note?: unknown; note_generated?: unknown; fragment?: unknown } | null;
   // a line ends at LF or CRLF alike (§10.1, #76); stored as LF, so the hash doesn't depend on the sender's OS
   const md = typeof body?.content_md === "string" ? body.content_md.replace(/\r\n?/g, "\n").trim() : "";
   if (!md) return fail(400, "content_md is required");
@@ -104,18 +106,22 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
     if (item.content_md === md) return fail(400, "the revision doesn't change the post");
     if (item.authored_kind === "fragment" && overCap(md)) return fail(400, `fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters`);
   } else if (note) return fail(400, "a note describes a revision; a new post has none");
+  // a new post is a thread unless flagged a fragment; a revision keeps its post's kind
+  const fragment = body!.fragment === true;
+  if (fragment && item) return fail(400, "a revision keeps its post's kind");
+  if (fragment && overCap(md)) return fail(400, `fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters`);
 
   const composed = await compose(db, site.origin, md, item?.id);
   if (!composed.ok) return fail(422, composed.error);
-  if (composed.thread && item?.authored_kind === "fragment") return fail(400, "a fragment can't quote");
-  const kind = item ? item.authored_kind : composed.thread || threadLength(md) ? "thread" : "fragment";
+  if (composed.thread && (fragment || item?.authored_kind === "fragment")) return fail(400, "a fragment can't quote");
+  const kind = item ? item.authored_kind : fragment ? "fragment" : "thread";
 
   const draft: Draft = {
     id: newId(), content_md: md, generated: generated ? JSON.stringify([generated]) : null, created: now(), chat_id: cfg.chatId, message_id: null, file_message_id: null,
-    item_id: item?.id ?? null, base_version: item?.version ?? null, note, note_generated: note && body!.note_generated === true ? 1 : 0,
+    item_id: item?.id ?? null, base_version: item?.version ?? null, note, note_generated: note && body!.note_generated === true ? 1 : 0, fragment: fragment ? 1 : 0,
   };
-  await db.prepare("INSERT INTO drafts (id, content_md, generated, created, chat_id, item_id, base_version, note, note_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(draft.id, draft.content_md, draft.generated, draft.created, draft.chat_id, draft.item_id, draft.base_version, draft.note, draft.note_generated).run();
+  await db.prepare("INSERT INTO drafts (id, content_md, generated, created, chat_id, item_id, base_version, note, note_generated, fragment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(draft.id, draft.content_md, draft.generated, draft.created, draft.chat_id, draft.item_id, draft.base_version, draft.note, draft.note_generated, draft.fragment).run();
 
   const chars = [...md].length;
   const head = item
@@ -124,7 +130,7 @@ export async function handleDraftRequest(req: Request, db: D1Database, site: Sit
         note ? `note${draft.note_generated ? " (written by the client)" : ""}: <i>${esc(note)}</i>` : "no note",
         `changes: ${changes(item.content_md, md)}`,
       ]
-    : [`📝 <b>draft</b> · ${kind}${kind === "thread" && chars > THREAD_AT ? ` (over ${THREAD_AT.toLocaleString("en")} characters)` : ""} · ${chars.toLocaleString("en")} characters`];
+    : [`📝 <b>draft</b> · ${kind} · ${chars.toLocaleString("en")} characters`];
   if (generated) head.push(`generated${generated.model ? ` by ${esc(generated.model)}` : ""}: it publishes marked as machine-generated`);
   // a revision's preview replies to the post's latest message in Pub, so a post's drafts chain under it
   const under = item && (await db.prepare("SELECT message_id FROM tg_messages WHERE item_id = ? AND chat_id = ? ORDER BY message_id DESC LIMIT 1").bind(item.id, cfg.chatId).first<{ message_id: number }>());

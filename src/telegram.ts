@@ -1,6 +1,6 @@
 // Telegram webhook: Pub topic publishes, Sub topics manage subscriptions.
 // Bot API: https://core.telegram.org/bots/api
-import { FRAGMENT_CAP, ID_RE, overCap, pagePath, THREAD_AT, threadLength, textContent, type Site, type StubOf } from "./blyg";
+import { FRAGMENT_CAP, ID_RE, overCap, pagePath, textContent, type Site, type StubOf } from "./blyg";
 import { compose, labelFor } from "./compose";
 import { deleteDraft, draftForMessage } from "./drafts";
 import { blogroll, file, setPage, setRolled, unfile } from "./home";
@@ -82,19 +82,25 @@ async function inSub(db: D1Database, cfg: Config, m: TgMessage) {
   return !!m.is_topic_message && commandName(m.text!) === "sub";
 }
 
+// a new post is a thread unless it opens with /fragment: a thread has no cap, and a fragment is the short form,
+// chosen on purpose (§5.3). The flag stays in your message, so edits and /republish read past it
+const FLAG = /^\s*\/fragment(?:@\w+)?(?=\s|$)\s*/i;
+const unflag = <T extends { text?: string }>(m: T): T => (m.text ? { ...m, text: m.text.replace(FLAG, "") } : m);
+
 export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site, cfg: Config) {
   if (update.edited_message) return handleEdit(update.edited_message, db, site, cfg);
   const m = update.message;
   if (m?.text?.startsWith("/") && (await inSub(db, cfg, m))) return () => handleSubCommand(m, db, cfg);
   if (m?.pinned_message && inPub(cfg, m)) return handlePin(m, m.pinned_message, null, db, site, cfg);
   if (!m?.text || !inPub(cfg, m)) return null;
-  if (m.text.startsWith("/")) return handlePubCommand(m, db, site, cfg);
+  const fragment = FLAG.test(m.text);
+  if (m.text.startsWith("/") && !fragment) return handlePubCommand(m, db, site, cfg);
 
   // Telegram retries webhooks; a message publishes at most once
   if (await itemForMessage(db, m.chat.id, m.message_id)) return null;
 
   // a reply to blyxt's "what changed?" is the note for the edit it holds, never a post of its own
-  const held = m.reply_to_message && (await heldForAsk(db, m.chat.id, m.reply_to_message.message_id));
+  const held = !fragment && m.reply_to_message && (await heldForAsk(db, m.chat.id, m.reply_to_message.message_id));
   if (held) {
     if (held.state === "held") return publishHeldEdit(m, held, m.text.trim(), db, site, cfg);
     // a note that came too late is lost, so say so; a retried one for a published edit needs nothing
@@ -102,21 +108,25 @@ export async function handleUpdate(update: TgUpdate, db: D1Database, site: Site,
     return null;
   }
 
-  const prefix = (await quotePrefix(db, site, m)) ?? (await linkPrefix(db, site, m));
-  const md = (prefix?.md ?? "") + (prefix?.rest ?? m.text).trim();
+  const post = unflag(m);
+  if (!post.text!.trim()) return () => reply(cfg, m, "/fragment <text> publishes it as a fragment; without the flag, a post is a thread");
+  const prefix = (await quotePrefix(db, site, post)) ?? (await linkPrefix(db, site, post));
+  const md = (prefix?.md ?? "") + (prefix?.rest ?? post.text!).trim();
   const composed = await compose(db, site.origin, md);
   if (!composed.ok) return () => reply(cfg, m, `not published: ${composed.error}. fix it and send it again`);
+  if (fragment && composed.thread) return () => reply(cfg, m, "not published: a fragment can't quote. send it without /fragment to publish a thread");
+  if (fragment && overCap(md)) {
+    return () => reply(cfg, m, `not published: fragments stay within ${FRAGMENT_CAP.toLocaleString("en")} characters, and this is ${[...md].length.toLocaleString("en")}. trim it, or send it without /fragment to publish a thread`);
+  }
   // a stub is a response, and one with nothing to say is a misuse (§10.6)
   if (composed.stub && !md.replace(/^!\[\[[^\]]*\]\]\n(?:>.*\n)*/, "").trim()) {
     return () => reply(cfg, m, "not published: say something about it. a stub is a response, so it needs your words after the quote");
   }
-  // a long message becomes a thread, which has no cap
-  const long = !composed.thread && threadLength(md);
-  const kind = composed.thread || long ? "thread" : "fragment";
+  const kind = fragment ? "fragment" : "thread";
   const item = await publishNew(db, kind, { md, html: composed.html, transclusions: composed.transclusions, links: composed.links, stubOf: composed.stub }, { chatId: m.chat.id, messageId: m.message_id, prefix: prefix?.md });
   return async () => {
     await mention(db, site, item);
-    await reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${long ? ` (over ${THREAD_AT.toLocaleString("en")} characters)` : ""}${await stubNote(db, composed.stub, site, item.id)} → ${site.origin}${pagePath(item)}`);
+    await reply(cfg, m, `published ${kind} v1${await stubNote(db, composed.stub, site, item.id)} → ${site.origin}${pagePath(item)}`);
   };
 }
 
@@ -197,8 +207,9 @@ async function linkPrefix(db: D1Database, site: Site, m: TgMessage) {
 }
 
 // editing a published message publishes its next version
-async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config) {
-  if (!m.text || !inPub(cfg, m)) return null;
+async function handleEdit(message: TgMessage, db: D1Database, site: Site, cfg: Config) {
+  if (!message.text || !inPub(cfg, message)) return null;
+  const m = unflag(message) as TgMessage & { text: string };
   const link = await itemForMessage(db, m.chat.id, m.message_id);
   if (!link) return null;
 
@@ -243,7 +254,7 @@ async function handleEdit(m: TgMessage, db: D1Database, site: Site, cfg: Config)
   };
 }
 
-const PUB_USAGE = "reply to a published post with /note <what you're changing> before editing it, /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); /file <collection>, /unfile <collection>, /page <menu label> or /unpage; reply to a draft with /publish or /discard, or /discard a held edit";
+const PUB_USAGE = "reply to a published post with /note <what you're changing> before editing it, /withdraw [note], /republish [note] or /pin [vN] (or put its link first: /withdraw <link> [note]); /file <collection>, /unfile <collection>, /page <menu label> or /unpage; reply to a draft with /publish or /discard, or /discard a held edit. a new post is a thread; start it with /fragment to publish a fragment (up to 2,000 characters)";
 
 // the post a command names: the message it replies to, else a link or id as the first argument
 // (in a topic, a message that isn't a reply still replies to the topic's opening message, which maps to nothing)
@@ -407,13 +418,12 @@ async function handleDraftCommand(m: TgMessage, name: "publish" | "discard", db:
       await mention(db, site, item);
     };
   }
-  const long = !composed.thread && threadLength(draft.content_md);
-  const kind = composed.thread || long ? "thread" : "fragment";
+  const kind = draft.fragment ? "fragment" : "thread";
   const item = await publishNew(db, kind, { md: draft.content_md, html: composed.html, transclusions: composed.transclusions, links: composed.links, generated, stubOf: composed.stub }, { chatId: m.chat.id, messageId: draft.message_id! });
   await deleteDraft(db, draft.id);
   return async () => {
     await mention(db, site, item);
-    await reply(cfg, m, `published ${kind === "thread" ? "thread " : ""}v1${marked}${await stubNote(db, composed.stub, site, item.id)} → ${site.origin}${pagePath(item)}`);
+    await reply(cfg, m, `published ${kind} v1${marked}${await stubNote(db, composed.stub, site, item.id)} → ${site.origin}${pagePath(item)}`);
   };
 }
 
@@ -425,7 +435,7 @@ async function handleRepublish(m: TgMessage, id: string, note: string | null, db
   if (!item) return () => reply(cfg, m, `no post ${id} on this blyg`);
   if (item.kind !== "withdrawn") return () => reply(cfg, m, `this post isn't withdrawn (it's at v${item.version})`);
   const repliedTo = m.reply_to_message && (await itemForMessage(db, m.chat.id, m.reply_to_message.message_id));
-  const text = repliedTo?.item_id === id && m.reply_to_message?.from?.id === cfg.ownerId && m.reply_to_message.text?.trim();
+  const text = repliedTo?.item_id === id && m.reply_to_message?.from?.id === cfg.ownerId && unflag(m.reply_to_message).text?.trim();
   const last = text ? null : await lastContent(db, id);
   const md = text ? (repliedTo.prefix ?? "") + text : last?.content_md;
   if (!md) return () => reply(cfg, m, "nothing to republish: this post never had content");

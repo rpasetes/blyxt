@@ -44,7 +44,7 @@ test("/file and /page shape the home page's menu and h/ pages, and publish nothi
   expect(replies.slice(-3)).toEqual(['on the menu as "About" → https://me.example/blyg/', "filed in Feed Theory → https://me.example/blyg/h/feed-theory/", "already in Feed Theory → https://me.example/blyg/h/feed-theory/"]);
 
   const home = (await get(db, "")).body;
-  expect(home).toContain(`<span class="label">pages:</span> <a href="https://me.example/blyg/f/`);
+  expect(home).toContain(`<span class="label">pages:</span> <a href="https://me.example/blyg/t/`);
   expect(home).toContain(`>About</a>`);
   expect(home).toContain(`<a href="https://me.example/blyg/h/feed-theory/">Feed Theory</a> <span class="label">1</span>`);
   const page = await get(db, "h/feed-theory/");
